@@ -8,6 +8,7 @@ import {
     isRemoteClockRequest,
     prepareAnchoredSearchQuery,
 } from '../runtime-time.js';
+import { containsSensitiveQueryMaterial } from '../query-safety.js';
 
 const tokyoClock = captureRuntimeClock({
     now: new Date('2026-07-29T20:06:14.000Z'),
@@ -323,6 +324,15 @@ const conflictingPlannerDay = prepareAnchoredSearchQuery('Tokyo weather tomorrow
 });
 assert.doesNotMatch(conflictingPlannerDay.logicalQuery, /tomorrow/u);
 assert.match(conflictingPlannerDay.executedQuery, /yesterday reference UTC instant 2026-07-29T20:06Z/u);
+
+const credentialBearingRewrite = prepareAnchoredSearchQuery('Tokyo weather forecast 2025-07-31', {
+    userText: 'api_key=abcdefghijklmnopqrstuvwxyz123456 what is Tokyo weather tomorrow?',
+    temporalKind: 'relative',
+    clock: tokyoClock,
+});
+assert.match(credentialBearingRewrite.executedQuery, /api_key=/u);
+assert.equal(containsSensitiveQueryMaterial(credentialBearingRewrite.executedQuery), true);
+
 
 const releaseDateQuery = prepareAnchoredSearchQuery('latest release date for Claude', {
     userText: 'What is the latest release date for Claude?',

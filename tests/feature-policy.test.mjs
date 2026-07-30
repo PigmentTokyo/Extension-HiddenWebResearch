@@ -58,17 +58,39 @@ assert.deepEqual(resolveResearchBackendSelection('unknown', true), {
 });
 
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+const plannerPromptsSource = await readFile(new URL('../planner-prompts.js', import.meta.url), 'utf8');
+const querySafetySource = await readFile(new URL('../query-safety.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.8.0');
+assert.equal(manifest.version, '1.8.1');
 assert.match(indexSource, /schemaVersion:\s*8/u);
 assert.match(indexSource, /body:\s*JSON\.stringify\(\{ query \}\)/u);
 assert.match(indexSource, /if \(!isResearchBackendEnabled\(settings\.researchBackend\)/u);
 assert.deepEqual(
     evaluateNativeResearchGate('Tokyo weather tomorrow', 'auto'),
     { shouldCall: true, reason: 'dynamic_topic' },
+);
+assert.deepEqual(
+    evaluateNativeResearchGate('Continue this fictional roleplay scene', 'auto'),
+    { shouldCall: false, reason: 'creative_or_roleplay' },
+);
+assert.deepEqual(
+    evaluateNativeResearchGate('Explain photosynthesis', 'explicit'),
+    { shouldCall: false, reason: 'explicit_not_requested' },
+);
+assert.deepEqual(
+    evaluateNativeResearchGate('Search the web for the latest release', 'explicit'),
+    { shouldCall: true, reason: 'explicit_request' },
+);
+assert.deepEqual(
+    evaluateNativeResearchGate('Hello', 'always'),
+    { shouldCall: true, reason: 'policy_always' },
+);
+assert.deepEqual(
+    evaluateNativeResearchGate('Do not search the web; use only provided context', 'always'),
+    { shouldCall: false, reason: 'user_opt_out' },
 );
 assert.match(indexSource, /extension_prompt_types\.IN_CHAT/u);
 assert.match(indexSource, /extension_prompt_roles\.SYSTEM/u);
@@ -135,10 +157,41 @@ assert.match(
 );
 assert.match(indexSource, /当前连接不支持安全工具消息，已自动回退隐藏研究包/u);
 assert.match(indexSource, /setResearchPrompt\(''\)/u);
+assert.match(indexSource, /buildPlannerPriorTurns/u);
+assert.match(indexSource, /forceInitialSearch:\s*mustSearch && !evidence\.length/u);
+assert.match(indexSource, /HWR_INTERNAL_PLANNER_PROFILE=\$\{adapter\}/u);
+assert.match(plannerPromptsSource, /HWR_INTERNAL_PLANNER_PROFILE=\$\{adapter\}/u);
+assert.match(indexSource, /invalid decision after evidence collection/u);
+assert.match(plannerPromptsSource, /PLANNER_INPUT_JSON/u);
+assert.match(plannerPromptsSource, /latest_user_request/u);
+assert.match(plannerPromptsSource, /force_initial_search/u);
+assert.match(plannerPromptsSource, /code may require search for current APIs or versions/u);
+assert.match(plannerPromptsSource, /creative or roleplay tasks may require search for exact canon facts/u);
+assert.doesNotMatch(plannerPromptsSource, /<conversation>|<research_state>/u);
+assert.doesNotMatch(plannerPromptsSource, /END_PLANNER_INPUT_JSON/u);
+assert.match(plannerPromptsSource, /compactSearchRequest\(latestUserRequest, 4000\)/u);
+assert.match(indexSource, /searchPolicy:\s*settings\.searchPolicy/u);
+assert.match(indexSource, /evidence\.length && decision\.unresolved\.length/u);
+assert.match(indexSource, /if \(unresolvedGaps\.length\) \{\s*researchPartial = true/u);
+assert.match(indexSource, /buildSafeFallbackQuery\(userText, 220\)/u);
+assert.match(indexSource, /containsSensitiveQueryMaterial\(query\)/u);
+assert.match(indexSource, /blockedUnsafeQueries/u);
+assert.match(indexSource, /blockedThisDecision/u);
+assert.match(indexSource, /blockedPreparedQueryCount/u);
+assert.match(indexSource, /requested more research but produced no new executable query/u);
+assert.match(indexSource, /credential-shaped search material/u);
+assert.match(indexSource, /planner-requested web search failed/u);
+assert.match(indexSource, /if \(hadSearchFailure\) \{/u);
+assert.match(querySafetySource, /PRIVATE KEY|Bearer|api\[_-\]\?key/u);
+assert.match(querySafetySource, /\[middle omitted\]/u);
 
 const anchoringStart = indexSource.indexOf('const preparedQuery = prepareAnchoredSearchQuery');
+const finalQueryStart = indexSource.indexOf('const query = preparedQuery.executedQuery', anchoringStart);
+const finalSafetyStart = indexSource.indexOf('containsSensitiveQueryMaterial(query)', finalQueryStart);
 const dispatchStart = indexSource.indexOf('const result = await searchStructuredBackend', anchoringStart);
 assert.ok(anchoringStart >= 0);
+assert.ok(finalSafetyStart > finalQueryStart);
+assert.ok(dispatchStart > finalSafetyStart);
 assert.ok(dispatchStart > anchoringStart);
 
 const structuredStart = indexSource.indexOf('async function runStructuredSearchResearch');
@@ -149,7 +202,9 @@ assert.ok(hardOptOutGuard > structuredStart);
 assert.ok(plannerStart > hardOptOutGuard);
 
 assert.match(visibleSettingsHtml, /<option value="searxng">/u);
-assert.match(visibleSettingsHtml, /查询与回答策略/u);
+assert.match(visibleSettingsHtml, /for="hwr_adapter">[^<]+<\/label>/u);
+assert.match(visibleSettingsHtml, /<option value="claude">Claude /u);
+assert.match(visibleSettingsHtml, /<option value="gemini">Gemini /u);
 assert.match(visibleSettingsHtml, /id="hwr_result_transport"/u);
 assert.match(visibleSettingsHtml, /隐藏工具结果优先/u);
 assert.match(visibleSettingsHtml, /固定使用隐藏研究包/u);

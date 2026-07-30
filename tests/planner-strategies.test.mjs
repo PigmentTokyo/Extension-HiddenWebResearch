@@ -6,6 +6,7 @@ import {
     extractQueryFeatures,
     filterNovelQueries,
     getResearchCitationInstruction,
+    getResearchPlannerInstruction,
     getResearchResponseProfile,
     getResearchStrategyLabel,
     getResearchStrategyProfile,
@@ -51,6 +52,18 @@ assert.equal(getResearchStrategyProfile('other').conservative, true);
 assert.equal(getResearchResponseProfile('anthropic').id, 'claude-inspired');
 assert.equal(getResearchResponseProfile('vertexai').id, 'gemini-inspired');
 assert.equal(getResearchResponseProfile('deepseek').id, 'deepseek-v4-pro');
+assert.match(getResearchPlannerInstruction('claude'), /knowledge-first necessity check/u);
+assert.match(getResearchPlannerInstruction('claude'), /exactly one highest-value precise query/u);
+assert.match(getResearchPlannerInstruction('claude'), /never claim this is Anthropic private wording/u);
+assert.match(getResearchPlannerInstruction('claude'), /In each later round/u);
+assert.match(getResearchPlannerInstruction('gemini'), /grounding-improvement check/u);
+assert.match(getResearchPlannerInstruction('gemini'), /materially improve factual accuracy/u);
+assert.match(getResearchPlannerInstruction('gemini'), /high-intent, standalone search queries/u);
+assert.match(getResearchPlannerInstruction('gemini'), /genuinely complementary independent facets/u);
+assert.match(getResearchPlannerInstruction('gemini'), /never claim this is Google private wording/u);
+assert.match(getResearchPlannerInstruction('deepseek'), /fewest queries/u);
+assert.match(getResearchPlannerInstruction('glm-5.2'), /Plan hierarchically/u);
+assert.match(getResearchPlannerInstruction('kimi-k3'), /aggressive convergence/u);
 assert.match(getResearchResponseProfile('claude').instruction, /without imitating any private protocol/u);
 assert.match(getResearchResponseProfile('claude').instruction, /without.*Anthropic native search/u);
 assert.match(getResearchResponseProfile('gemini').instruction, /without.*Google native grounding/u);
@@ -192,7 +205,7 @@ assert.deepEqual(
     },
 );
 assert.deepEqual(
-    parsePlannerDecision('{"queries":{"text":"single object query"},"unresolved":"one gap"}', 1),
+    parsePlannerDecision('{"action":"SEARCH","queries":{"text":"single object query"},"unresolved":"one gap"}', 1),
     {
         action: 'SEARCH',
         queries: ['single object query'],
@@ -213,6 +226,96 @@ assert.deepEqual(
     parsePlannerDecision('DONE', 1),
     {
         action: 'DONE',
+        queries: [],
+        queryPurposes: [],
+        unresolved: [],
+    },
+);
+
+assert.deepEqual(
+    parsePlannerDecision('{"action":"DONE","queries":[{"query":"must be discarded"}],"unresolved":[]}', 1),
+    {
+        action: 'INVALID',
+        queries: [],
+        queryPurposes: [],
+        unresolved: [],
+    },
+);
+assert.deepEqual(
+    parsePlannerDecision('{"action":"SEARCH","queries":[],"unresolved":["missing source"]}', 1),
+    {
+        action: 'INVALID',
+        queries: [],
+        queryPurposes: [],
+        unresolved: ['missing source'],
+    },
+);
+assert.deepEqual(
+    parsePlannerDecision('{"action":"SEARCH","queries":[}', 1),
+    {
+        action: 'INVALID',
+        queries: [],
+        queryPurposes: [],
+        unresolved: [],
+    },
+);
+assert.deepEqual(
+    parsePlannerDecision('{"action":"MAYBE","queries":["unsafe fallback query"]}', 1),
+    {
+        action: 'INVALID',
+        queries: [],
+        queryPurposes: [],
+        unresolved: [],
+    },
+);
+assert.deepEqual(
+    parsePlannerDecision('{"action":"MAYBE","queries":[]}', 1),
+    {
+        action: 'INVALID',
+        queries: [],
+        queryPurposes: [],
+        unresolved: [],
+    },
+);
+assert.deepEqual(
+    parsePlannerDecision('{"action":"SEARCH","status":"DONE","queries":["conflicting query"]}', 1),
+    {
+        action: 'INVALID',
+        queries: [],
+        queryPurposes: [],
+        unresolved: [],
+    },
+);
+
+for (const statusOnlyDecision of [
+    '{"status":"SEARCH","queries":["latest docs"]}',
+    '{"status":"DONE","queries":[]}',
+]) {
+    assert.deepEqual(
+        parsePlannerDecision(statusOnlyDecision, 1),
+        {
+            action: 'INVALID',
+            queries: [],
+            queryPurposes: [],
+            unresolved: [],
+        },
+    );
+}
+
+assert.deepEqual(
+    parsePlannerDecision('{"queries":["latest API without an explicit action"]}', 1),
+    {
+        action: 'INVALID',
+        queries: [],
+        queryPurposes: [],
+        unresolved: [],
+    },
+);
+
+assert.deepEqual(
+    parsePlannerDecision('{}', 1),
+    {
+        action: 'INVALID',
         queries: [],
         queryPurposes: [],
         unresolved: [],

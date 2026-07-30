@@ -13,8 +13,8 @@ const STRATEGY_ALIASES = Object.freeze({
 });
 
 const STRATEGY_LABELS = Object.freeze({
-    claude: 'Claude 启发：顺序查证',
-    gemini: 'Gemini 启发：双分面 Grounding',
+    claude: 'Claude 启发：必要性门控 / 顺序查证',
+    gemini: 'Gemini 启发：搜索增益 / 查询提炼',
     'deepseek-v4-pro': 'DeepSeek V4 Pro：分面合并',
     'glm-5.2': 'GLM 5.2：层级核验',
     'kimi-k3': 'Kimi K3：研究收敛',
@@ -28,6 +28,43 @@ const RESPONSE_PROFILE_IDS = Object.freeze({
     'glm-5.2': 'glm-5.2',
     'kimi-k3': 'kimi-k3',
     other: 'general',
+});
+
+const PLANNER_STYLE_INSTRUCTIONS = Object.freeze({
+    claude: [
+        'Apply a Claude-inspired policy reconstructed from public tool behavior; never claim this is Anthropic private wording or a native Anthropic tool call.',
+        'Use a cautious knowledge-first necessity check: search for an explicit browse request; current, changing, live, or plausibly outdated facts; material high-precision facts where freshness, attribution, or error risk matters; exact sources or quotations; or a material low-confidence knowledge gap.',
+        'Start with exactly one highest-value precise query and prefer the responsible primary source. Do not split a request into many fields.',
+        'In each later round, issue at most one sequential follow-up for a concrete unresolved fact, contradiction, or recency gap. Stop as soon as the evidence is sufficient.',
+    ].join(' '),
+    gemini: [
+        'Apply a Gemini-inspired policy reconstructed from public Google Search behavior; never claim this is Google private wording or native Google grounding.',
+        'Use a grounding-improvement check: search only when external retrieval would materially improve factual accuracy, freshness, attribution, specificity, or completeness.',
+        'Do not search merely because more detail could be found when reliable internal knowledge or supplied context is already sufficient.',
+        'Convert the information need into concise, high-intent, standalone search queries instead of copying the user sentence.',
+        'The first round may contain two queries only when they are genuinely complementary independent facets; otherwise use one.',
+        'Later rounds may contain only the single highest-value gap-filling query. Stop when the material requested information is supported.',
+    ].join(' '),
+    'deepseek-v4-pro': [
+        'Map the material factual facets, then consolidate closely related facets into the fewest queries.',
+        'The first round may contain at most two queries: one consolidated, high-intent primary or official-source query covering closely related facets when an authority is inferable, plus one genuinely orthogonal verification query when necessary. Do not make the consolidated query vague or overstuffed.',
+        'Do not create one query per requested field. After evidence arrives, select only the unresolved gap with the highest information gain and stop once coverage is sufficient.',
+    ].join(' '),
+    'glm-5.2': [
+        'Plan hierarchically from scope to authority to unresolved layer.',
+        'When one exists, begin with an authoritative hub, regulator, standards body, or official summary that can cover the top-level question; use a second first-round query only for an orthogonal jurisdiction, definition, implementation detail, timeline, or statistical scope.',
+        'Preserve official terminology and track date, jurisdiction, and measurement-scope mismatches. Each later round may verify only one unresolved layer.',
+    ].join(' '),
+    'kimi-k3': [
+        'Optimize for the minimum sufficient evidence set and aggressive convergence.',
+        'Infer the responsible authority or domain when possible; use one authority-specific or site-restricted primary query, plus at most one orthogonal verification query in the first round.',
+        'Do not branch into a deep-research tree. Reuse gathered evidence, request only the single most valuable gap-filling follow-up, and stop immediately when the material information needs are covered.',
+    ].join(' '),
+    other: [
+        'Use a conservative knowledge-first loop.',
+        'Search only when external evidence would materially improve factual accuracy, freshness, specificity, or verification.',
+        'Choose one precise, high-value query at a time, prefer primary sources, and stop as soon as the evidence is sufficient.',
+    ].join(' '),
 });
 
 const RESPONSE_STYLE_INSTRUCTIONS = Object.freeze({
@@ -309,6 +346,18 @@ export function getResearchStrategyLabel(value) {
  */
 export function getResearchStrategyProfile(value) {
     return RESEARCH_STRATEGY_PROFILES[normalizeStrategyName(value)];
+}
+
+/**
+ * Describes how the hidden planner should decide whether to search and shape
+ * subsequent queries. These profiles imitate public behavior only; they are
+ * not vendor system prompts or native tool protocols.
+ *
+ * @param {unknown} value Strategy name or provider alias.
+ * @returns {string}
+ */
+export function getResearchPlannerInstruction(value) {
+    return PLANNER_STYLE_INSTRUCTIONS[normalizeStrategyName(value)];
 }
 
 /**
@@ -673,12 +722,19 @@ function makePlannerDecision(action, queryPlans, unresolved, maxQueries) {
     const limit = Number.isFinite(limitValue)
         ? Math.max(0, Math.floor(limitValue))
         : Number.POSITIVE_INFINITY;
-    const plans = queryPlans
+    const normalizedAction = ['SEARCH', 'DONE', 'INVALID'].includes(String(action).toUpperCase())
+        ? String(action).toUpperCase()
+        : 'INVALID';
+    const availablePlans = queryPlans
         .map(getPlannerQueryPlan)
-        .filter(plan => plan.query)
-        .slice(0, limit);
+        .filter(plan => plan.query);
+    const boundedPlans = availablePlans.slice(0, limit);
+    let semanticAction = normalizedAction;
+    if (semanticAction === 'SEARCH' && !boundedPlans.length) semanticAction = 'INVALID';
+    if (semanticAction === 'DONE' && availablePlans.length) semanticAction = 'INVALID';
+    const plans = semanticAction === 'SEARCH' ? boundedPlans : [];
     return {
-        action,
+        action: semanticAction,
         queries: plans.map(plan => plan.query),
         queryPurposes: plans.map(plan => plan.purpose),
         unresolved: [...new Set(unresolved.map(getPlannerGap).filter(Boolean))].slice(0, 8),
@@ -719,10 +775,13 @@ export function parsePlannerDecision(rawValue, maxQueries = Number.POSITIVE_INFI
                 ?? parsed.missing;
             const queryPlans = toPlannerArray(queryValues);
             const unresolved = toPlannerArray(gapValues);
-            const explicitAction = String(parsed.action || parsed.status || '').toUpperCase();
-            const action = explicitAction === 'SEARCH' || explicitAction === 'DONE'
-                ? explicitAction
-                : queryPlans.length ? 'SEARCH' : 'DONE';
+            const hasAction = Object.prototype.hasOwnProperty.call(parsed, 'action');
+            const hasStatus = Object.prototype.hasOwnProperty.call(parsed, 'status');
+            const normalizedAction = hasAction ? String(parsed.action || '').toUpperCase() : '';
+            const normalizedStatus = hasStatus ? String(parsed.status || '').toUpperCase() : '';
+            const validAction = normalizedAction === 'SEARCH' || normalizedAction === 'DONE';
+            const statusAgrees = !hasStatus || normalizedStatus === normalizedAction;
+            const action = validAction && statusAgrees ? normalizedAction : 'INVALID';
             return makePlannerDecision(action, queryPlans, unresolved, maxQueries);
         } catch {
             // Fall through to the plain-text compatibility parser.

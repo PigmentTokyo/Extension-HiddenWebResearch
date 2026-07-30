@@ -26,12 +26,12 @@
             </select>
 
             <div id="hwr_adapter_block">
-                <label for="hwr_adapter">当前回答模型的查询与回答策略</label>
+                <label for="hwr_adapter">当前回答模型的查询规划与最终回答策略</label>
                 <div class="hwr_inline">
                     <select id="hwr_adapter" class="text_pole">
                         <option value="auto">自动识别</option>
-                        <option value="claude">Claude 启发：顺序查证</option>
-                        <option value="gemini">Gemini 启发：双分面 Grounding</option>
+                        <option value="claude">Claude 启发：必要性门控 / 顺序查证</option>
+                        <option value="gemini">Gemini 启发：搜索增益 / 查询提炼</option>
                         <option value="deepseek-v4-pro">DeepSeek V4 Pro：分面合并</option>
                         <option value="glm-5.2">GLM 5.2：层级核验</option>
                         <option value="kimi-k3">Kimi K3：研究收敛</option>
@@ -43,7 +43,9 @@
                 </div>
                 <div id="hwr_resolved_adapter" class="hwr_hint"></div>
                 <div class="hwr_notice">
-                    这些是纯前端查询规划与最终回答策略，不会调用任何模型厂商的官方搜索服务。Claude 与 Gemini 分别采用顺序查证/克制引用、双分面 Grounding/逐段引用；DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 分别强调分面合并、层级核验与研究收敛。硬查询帽分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3。
+                    这里决定三件事：模糊场景如何判断是否值得搜索、怎样组织与补充查询、当前模型最后怎样使用证据回答；它不是联网总开关，也不会把当前模型替换成 Claude 或 Gemini，更不会调用厂商官方搜索服务。
+                    Claude 启发先判断外部证据是否真正必要，再逐个查证缺口并克制引用；Gemini 启发先判断搜索能否改善正确性、时效性或可验证性，再把信息需求提炼成高意图查询并逐段 Grounding。
+                    DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 分别强调分面合并、层级核验与研究收敛。硬查询帽分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3。
                 </div>
             </div>
 
@@ -72,7 +74,8 @@
                 <option value="explicit">仅在用户明确要求联网时搜索（其他消息本地跳过）</option>
             </select>
             <div class="hwr_hint">
-                “模型自动判断”会先调用当前回答模型作为隐藏规划器，即使最后不搜索也会消耗规划 tokens；“仅明确要求联网”可在其他消息上本地零 token 跳过。明确要求“不联网”始终优先。
+                触发策略回答“这一轮是否进入研究流程”。“模型自动判断”会调用当前回答模型作为隐藏规划器：明确搜索、天气、时效信息和推荐等高置信场景由本地门控保证至少搜索一次，其余模糊场景由上面的模型策略判断；即使最后不搜索也会消耗规划 tokens。
+                “每条消息”仍会让规划器先组织查询，但至少执行一次搜索；明确禁止联网和只问本机日期/时间是例外。“仅明确要求联网”会在其他消息上本地零 token 跳过。当前用户明确要求“不联网”始终优先于全部选项。
             </div>
 
             <div id="hwr_searxng_settings" class="hwr_backend_box">
