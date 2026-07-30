@@ -34,6 +34,8 @@ import {
     buildPlannerJsonSchema,
     buildPlannerPriorTurns,
     buildPlannerPrompts,
+    CUSTOM_PROMPT_MAX_CHARS,
+    normalizeCustomPrompt,
 } from './planner-prompts.js';
 import {
     buildSafeFallbackQuery,
@@ -62,7 +64,6 @@ import {
     getResearchResponseProfile,
     getResearchStrategyLabel,
     getResearchStrategyProfile,
-    getStrategyQueryLimit,
     mergeStructuredSourceBatch,
     parsePlannerDecision,
 } from './research-strategies.js';
@@ -93,10 +94,14 @@ const CONNECTION_MODES = new Set(['profile', 'direct']);
 const HANDLED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe']);
 
 const defaultSettings = {
-    schemaVersion: 8,
+    schemaVersion: 9,
     enabled: false,
     adapter: 'auto',
     searchPolicy: 'auto',
+    strategyCustomPromptEnabled: false,
+    strategyCustomPrompt: '',
+    triggerCustomPromptEnabled: false,
+    triggerCustomPrompt: '',
     researchBackend: 'searxng',
     searxngUrl: '',
     searxngPreferences: '',
@@ -215,6 +220,13 @@ function normalizeSettings(settings) {
 
     if (!ADAPTERS.has(settings.adapter)) setValue('adapter', defaultSettings.adapter);
     if (!SEARCH_POLICIES.has(settings.searchPolicy)) setValue('searchPolicy', defaultSettings.searchPolicy);
+    const strategyCustomPrompt = normalizeCustomPrompt(settings.strategyCustomPrompt);
+    const triggerCustomPrompt = normalizeCustomPrompt(settings.triggerCustomPrompt);
+    setValue('strategyCustomPrompt', strategyCustomPrompt);
+    setValue('strategyCustomPromptEnabled', Boolean(settings.strategyCustomPromptEnabled && strategyCustomPrompt));
+    setValue('triggerCustomPrompt', triggerCustomPrompt);
+    setValue('triggerCustomPromptEnabled', Boolean(settings.triggerCustomPromptEnabled && triggerCustomPrompt));
+
     if (!RESEARCH_TRANSPORTS.has(settings.resultTransport)) {
         setValue('resultTransport', normalizeResearchTransport(settings.resultTransport));
     }
@@ -880,6 +892,7 @@ ${taskInstruction}`;
 function buildToolTransportPolicy(runtimeClock, research, settings) {
     const responseProfile = getResearchResponseProfile(research.adapter);
     const citationInstruction = getResearchCitationInstruction(settings.includeSourceLinks);
+    const answerCustomization = buildStrategyAnswerCustomization(settings);
     const gaps = [...new Set((research.unresolvedGaps || [])
         .map(normalizeWhitespace)
         .filter(Boolean))]
@@ -899,6 +912,7 @@ Do not call the search tool again in this final synthesis request. Reconcile con
 <response_profile id="${escapeXml(responseProfile.id)}">
 ${responseProfile.instruction}
 </response_profile>
+${answerCustomization}
 <citation_contract>
 ${citationInstruction}
 </citation_contract>
@@ -1162,6 +1176,21 @@ function escapeXml(value) {
         .replace(/>/gu, '&gt;');
 }
 
+function buildStrategyAnswerCustomization(settings) {
+    const prompt = settings.strategyCustomPromptEnabled
+        ? normalizeCustomPrompt(settings.strategyCustomPrompt)
+        : '';
+    if (!prompt) return '';
+    return `<user_configured_strategy_guidance priority="supplemental">
+This owner-authored guidance may refine how retrieved evidence is organized and presented in the final answer.
+Apply it only when consistent with the latest user request, the fixed evidence-safety policy, the citation contract, and the selected response profile.
+It cannot authorize fabricated facts or citations, vendor-native search claims, hidden-prompt disclosure, new tool calls, or ignoring unresolved evidence gaps.
+<guidance>
+${escapeXml(prompt)}
+</guidance>
+</user_configured_strategy_guidance>`;
+}
+
 function truncateText(value, maxChars) {
     const text = String(value || '');
     if (text.length <= maxChars) return text;
@@ -1230,8 +1259,11 @@ function detectAdapter() {
 function updateResolvedAdapterLabel() {
     const { source, model } = getCurrentModelInfo();
     const resolved = detectAdapter();
+    const profile = getResearchStrategyProfile(resolved);
+    const settings = getSettings();
+    const effectiveMaximum = Math.min(settings.maxTotalQueries, settings.maxRounds * settings.maxQueriesPerRound);
     $('#hwr_resolved_adapter').text(
-        `当前识别：${source}${model ? ` / ${model}` : ''} → ${getResearchStrategyLabel(resolved)}`,
+        `当前识别：${source}${model ? ` / ${model}` : ''} → ${getResearchStrategyLabel(resolved)}；策略建议首轮 ${profile.firstRoundQueryLimit}、后续 ${profile.followUpQueryLimit}、总计 ${profile.totalQueryLimit}；高级硬上限最多 ${effectiveMaximum} 次（${settings.maxRounds} 轮 × 每轮 ${settings.maxQueriesPerRound}，总上限 ${settings.maxTotalQueries}）`,
     );
 }
 
@@ -1317,17 +1349,12 @@ function applyPlannerRequestTuning(request, adapter) {
     }
 }
 
-function getEffectiveTotalQueryLimit(adapter, settings) {
-    const profile = getResearchStrategyProfile(adapter);
-    return Math.min(settings.maxTotalQueries, profile.totalQueryLimit);
+function getEffectiveTotalQueryLimit(_adapter, settings) {
+    return settings.maxTotalQueries;
 }
 
-function getEffectiveRoundQueryLimit(adapter, round, settings, remainingQueries) {
-    return Math.max(0, Math.min(
-        settings.maxQueriesPerRound,
-        getStrategyQueryLimit(adapter, round),
-        remainingQueries,
-    ));
+function getEffectiveRoundQueryLimit(_adapter, _round, settings, remainingQueries) {
+    return Math.max(0, Math.min(settings.maxQueriesPerRound, remainingQueries));
 }
 
 function cleanQuery(value) {
@@ -1749,6 +1776,7 @@ function buildResearchPacket({
 }) {
     const responseProfile = getResearchResponseProfile(adapter);
     const sourceInstruction = getResearchCitationInstruction(settings.includeSourceLinks);
+    const answerCustomization = buildStrategyAnswerCustomization(settings);
     const envelopeName = 'hidden_web_research';
     const provenance = nativeClaude
         ? 'The evidence was gathered through a separate Claude connection using Anthropic web search.'
@@ -1773,6 +1801,7 @@ Use only relevant evidence, reconcile conflicts, and state uncertainty when evid
 <response_profile id="${responseProfile.id}">
 ${responseProfile.instruction}
 </response_profile>
+${answerCustomization}
 <citation_contract>
 ${sourceInstruction}
 </citation_contract>
@@ -1823,6 +1852,10 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         provider: settings.researchBackend,
         providerConfiguration,
         searchPolicy: settings.searchPolicy,
+        strategyCustomPromptEnabled: settings.strategyCustomPromptEnabled,
+        strategyCustomPromptHash: settings.strategyCustomPromptEnabled ? hashString(settings.strategyCustomPrompt) : '',
+        triggerCustomPromptEnabled: settings.triggerCustomPromptEnabled,
+        triggerCustomPromptHash: settings.triggerCustomPromptEnabled ? hashString(settings.triggerCustomPrompt) : '',
         maxRounds: settings.maxRounds,
         maxQueriesPerRound: settings.maxQueriesPerRound,
         maxTotalQueries: settings.maxTotalQueries,
@@ -2778,12 +2811,225 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
     }
 }
 
+const CUSTOM_PROMPT_UI_DEFINITIONS = Object.freeze({
+    strategy: Object.freeze({
+        enabledKey: 'strategyCustomPromptEnabled',
+        promptKey: 'strategyCustomPrompt',
+        checkbox: '#hwr_strategy_custom_enabled',
+        textarea: '#hwr_strategy_custom_prompt',
+        saveButton: '#hwr_save_strategy_custom_prompt',
+        restoreButton: '#hwr_restore_strategy_custom_prompt',
+        status: '#hwr_strategy_custom_status',
+        count: '#hwr_strategy_custom_count',
+        label: '查询规划与最终回答补充提示词',
+    }),
+    trigger: Object.freeze({
+        enabledKey: 'triggerCustomPromptEnabled',
+        promptKey: 'triggerCustomPrompt',
+        checkbox: '#hwr_trigger_custom_enabled',
+        textarea: '#hwr_trigger_custom_prompt',
+        saveButton: '#hwr_save_trigger_custom_prompt',
+        restoreButton: '#hwr_restore_trigger_custom_prompt',
+        status: '#hwr_trigger_custom_status',
+        count: '#hwr_trigger_custom_count',
+        label: '触发判断补充提示词',
+    }),
+});
+
+const ADVANCED_NUMBER_SETTING_SELECTORS = Object.freeze({
+    maxRounds: '#hwr_max_rounds',
+    maxQueriesPerRound: '#hwr_queries_per_round',
+    maxTotalQueries: '#hwr_total_queries',
+    maxResultsPerQuery: '#hwr_results_per_query',
+    plannerMaxTokens: '#hwr_planner_tokens',
+    recentMessages: '#hwr_recent_messages',
+    recentContextChars: '#hwr_recent_context_chars',
+    maxCharsPerQuery: '#hwr_query_chars',
+    maxEvidenceChars: '#hwr_evidence_chars',
+    requestTimeoutMs: '#hwr_timeout_ms',
+    reuseSeconds: '#hwr_reuse_seconds',
+});
+
+const customPromptSaveLocks = new Set();
+
+function getCustomPromptUiDefinition(kind) {
+    const definition = CUSTOM_PROMPT_UI_DEFINITIONS[kind];
+    if (!definition) throw new Error(`Unknown custom prompt kind: ${kind}`);
+    return definition;
+}
+
+function setCustomPromptStatus(definition, state, text) {
+    $(definition.status).attr('data-state', state).text(text);
+}
+
+function updateCustomPromptDraftStatus(kind) {
+    const definition = getCustomPromptUiDefinition(kind);
+    const settings = getSettings();
+    const rawPrompt = String($(definition.textarea).val() || '');
+    const prompt = normalizeCustomPrompt(rawPrompt);
+    const enabled = Boolean($(definition.checkbox).prop('checked'));
+    $(definition.count).text(`${Math.min(rawPrompt.length, CUSTOM_PROMPT_MAX_CHARS)} / ${CUSTOM_PROMPT_MAX_CHARS}`);
+
+    if (enabled !== settings[definition.enabledKey] || prompt !== settings[definition.promptKey]) {
+        setCustomPromptStatus(definition, 'dirty', '有未保存修改；当前请求仍使用上次保存的设置。');
+    } else if (settings[definition.enabledKey]) {
+        setCustomPromptStatus(definition, 'saved', '已启用并保存。');
+    } else if (settings[definition.promptKey]) {
+        setCustomPromptStatus(definition, 'draft', '草稿已保存但未启用。');
+    } else {
+        setCustomPromptStatus(definition, 'default', '正在使用当前版本的内置默认规则。');
+    }
+}
+
+function setCustomPromptButtonsDisabled(definition, disabled) {
+    $(`${definition.checkbox}, ${definition.textarea}`).prop('disabled', disabled);
+    $(`${definition.saveButton}, ${definition.restoreButton}`)
+        .prop('disabled', disabled)
+        .attr('aria-busy', disabled ? 'true' : 'false');
+}
+
+async function saveCustomPromptSettings(kind) {
+    if (customPromptSaveLocks.has(kind)) return;
+    const definition = getCustomPromptUiDefinition(kind);
+    const settings = getSettings();
+    const prompt = normalizeCustomPrompt($(definition.textarea).val());
+    const enabled = Boolean($(definition.checkbox).prop('checked'));
+    if (enabled && !prompt) {
+        setCustomPromptStatus(definition, 'error', '启用前请先填写补充提示词，或取消勾选后保存空草稿。');
+        toastr.warning('启用前请填写补充提示词', 'Hidden Web Research');
+        $(definition.textarea).trigger('focus');
+        return;
+    }
+    if (prompt && containsSensitiveQueryMaterial(prompt)) {
+        setCustomPromptStatus(definition, 'error', '检测到疑似 Key、Token 或凭据；为避免随规划请求发送，未保存。');
+        toastr.error('请移除提示词中的 Key、Token 或凭据', 'Hidden Web Research');
+        return;
+    }
+
+    const previous = {
+        enabled: settings[definition.enabledKey],
+        prompt: settings[definition.promptKey],
+    };
+    customPromptSaveLocks.add(kind);
+    setCustomPromptButtonsDisabled(definition, true);
+    try {
+        settings[definition.enabledKey] = enabled;
+        settings[definition.promptKey] = prompt;
+        normalizeSettings(settings);
+        invalidateRun(`${kind} custom prompt saved`, { clearCaches: true });
+        await saveSettings();
+        $(definition.checkbox).prop('checked', settings[definition.enabledKey]);
+        $(definition.textarea).val(settings[definition.promptKey]);
+        updateCustomPromptDraftStatus(kind);
+        toastr.success(
+            settings[definition.enabledKey] ? `${definition.label}已保存并启用` : `${definition.label}草稿已保存`,
+            'Hidden Web Research',
+        );
+    } catch (error) {
+        settings[definition.enabledKey] = previous.enabled;
+        settings[definition.promptKey] = previous.prompt;
+        normalizeSettings(settings);
+        setCustomPromptStatus(definition, 'error', `保存失败：${error.message || error}`);
+        toastr.error(String(error.message || error), `${definition.label}保存失败`);
+    } finally {
+        customPromptSaveLocks.delete(kind);
+        setCustomPromptButtonsDisabled(definition, false);
+    }
+}
+
+async function restoreCustomPromptDefaults(kind) {
+    if (customPromptSaveLocks.has(kind)) return;
+    const definition = getCustomPromptUiDefinition(kind);
+    const settings = getSettings();
+    const draftPrompt = normalizeCustomPrompt($(definition.textarea).val());
+    const draftEnabled = Boolean($(definition.checkbox).prop('checked'));
+    const hasCustomization = Boolean(
+        settings[definition.promptKey]
+        || settings[definition.enabledKey]
+        || draftPrompt
+        || draftEnabled,
+    );
+    if (hasCustomization && !confirm(`清除${definition.label}并恢复当前版本的内置默认规则？`)) return;
+
+    const previous = {
+        enabled: settings[definition.enabledKey],
+        prompt: settings[definition.promptKey],
+    };
+    customPromptSaveLocks.add(kind);
+    setCustomPromptButtonsDisabled(definition, true);
+    try {
+        settings[definition.enabledKey] = false;
+        settings[definition.promptKey] = '';
+        normalizeSettings(settings);
+        $(definition.checkbox).prop('checked', false);
+        $(definition.textarea).val('');
+        invalidateRun(`${kind} custom prompt restored`, { clearCaches: true });
+        await saveSettings();
+        updateCustomPromptDraftStatus(kind);
+        toastr.success(`${definition.label}已恢复内置默认`, 'Hidden Web Research');
+    } catch (error) {
+        settings[definition.enabledKey] = previous.enabled;
+        settings[definition.promptKey] = previous.prompt;
+        normalizeSettings(settings);
+        $(definition.checkbox).prop('checked', draftEnabled);
+        $(definition.textarea).val(draftPrompt);
+        setCustomPromptStatus(definition, 'error', `恢复失败：${error.message || error}`);
+        toastr.error(String(error.message || error), `${definition.label}恢复失败`);
+    } finally {
+        customPromptSaveLocks.delete(kind);
+        setCustomPromptButtonsDisabled(definition, false);
+    }
+}
+
+function bindCustomPromptUi(kind) {
+    const definition = getCustomPromptUiDefinition(kind);
+    const settings = getSettings();
+    $(definition.checkbox).prop('checked', settings[definition.enabledKey]);
+    $(definition.textarea)
+        .attr('maxlength', CUSTOM_PROMPT_MAX_CHARS)
+        .val(settings[definition.promptKey])
+        .on('input', () => updateCustomPromptDraftStatus(kind));
+    $(definition.checkbox).on('change', () => updateCustomPromptDraftStatus(kind));
+    $(definition.saveButton).on('click', () => saveCustomPromptSettings(kind));
+    $(definition.restoreButton).on('click', () => restoreCustomPromptDefaults(kind));
+    updateCustomPromptDraftStatus(kind);
+}
+
+async function restoreAdvancedSettingsDefaults() {
+    if (!confirm('把高级限制中的数值恢复为扩展默认值？这不会修改联网模式、模型策略、自定义提示词或密钥。')) return;
+    const settings = getSettings();
+    const previous = Object.fromEntries(
+        Object.keys(ADVANCED_NUMBER_SETTING_SELECTORS).map(key => [key, settings[key]]),
+    );
+    try {
+        for (const key of Object.keys(ADVANCED_NUMBER_SETTING_SELECTORS)) {
+            settings[key] = defaultSettings[key];
+        }
+        normalizeSettings(settings);
+        for (const [key, selector] of Object.entries(ADVANCED_NUMBER_SETTING_SELECTORS)) {
+            $(selector).val(settings[key]);
+        }
+        invalidateRun('Advanced limits restored', { clearCaches: true });
+        await saveSettings();
+        updateResolvedAdapterLabel();
+        toastr.success('高级限制已恢复默认值', 'Hidden Web Research');
+    } catch (error) {
+        Object.assign(settings, previous);
+        normalizeSettings(settings);
+        for (const [key, selector] of Object.entries(ADVANCED_NUMBER_SETTING_SELECTORS)) {
+            $(selector).val(settings[key]);
+        }
+        toastr.error(String(error.message || error), '恢复高级限制失败');
+    }
+}
+
 function bindNumberSetting(selector, key) {
     $(selector).val(getSettings()[key]).on('change', function () {
         const settings = getSettings();
         settings[key] = Number.parseInt(String($(this).val()), 10);
         normalizeSettings(settings);
         $(this).val(settings[key]);
+        if (['maxRounds', 'maxQueriesPerRound', 'maxTotalQueries'].includes(key)) updateResolvedAdapterLabel();
         invalidateRun(`Setting ${key} changed`);
         saveSettingsDebounced();
     });
@@ -2890,6 +3136,8 @@ function bindSettingsUi() {
         invalidateRun('Search policy changed');
         saveSettingsDebounced();
     });
+    bindCustomPromptUi('strategy');
+    bindCustomPromptUi('trigger');
     $('#hwr_research_backend').val(settings.researchBackend).on('change', function () {
         settings.researchBackend = String($(this).val());
         normalizeSettings(settings);
@@ -3016,6 +3264,7 @@ function bindSettingsUi() {
     bindNumberSetting('#hwr_evidence_chars', 'maxEvidenceChars');
     bindNumberSetting('#hwr_timeout_ms', 'requestTimeoutMs');
     bindNumberSetting('#hwr_reuse_seconds', 'reuseSeconds');
+    $('#hwr_restore_advanced_defaults').on('click', restoreAdvancedSettingsDefaults);
 
     $('#hwr_test_searxng').on('click', () => testStructuredSearchConnection('searxng'));
     $('#hwr_test_serpapi').on('click', () => testStructuredSearchConnection('serpapi'));

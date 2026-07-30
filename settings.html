@@ -45,8 +45,39 @@
                 <div class="hwr_notice">
                     这里决定三件事：模糊场景如何判断是否值得搜索、怎样组织与补充查询、当前模型最后怎样使用证据回答；它不是联网总开关，也不会把当前模型替换成 Claude 或 Gemini，更不会调用厂商官方搜索服务。
                     Claude 启发先判断外部证据是否真正必要，再逐个查证缺口并克制引用；Gemini 启发先判断搜索能否改善正确性、时效性或可验证性，再把信息需求提炼成高意图查询并逐段 Grounding。
-                    DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 分别强调分面合并、层级核验与研究收敛。硬查询帽分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3。
+                    DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 分别强调分面合并、层级核验与研究收敛。策略推荐总查询数分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3；它们只是经济性建议，实际每轮与总查询硬上限完全由“高级限制”中的数值决定。
                 </div>
+                <details class="hwr_prompt_editor">
+                    <summary>自定义查询规划与最终回答策略</summary>
+                    <div class="hwr_prompt_editor_body">
+                        <div class="hwr_hint">
+                            这是所选内置策略之上的补充层，同时影响隐藏规划器怎样组织查询，以及搜后怎样使用证据回答；不会替换当前模型，也不会调用所选名称对应的厂商模型。
+                            例如当前回答模型是 DeepSeek 而手选 Claude，仍由 DeepSeek 执行，只是采用 Claude 启发的规则与这份补充指令。
+                        </div>
+                        <label class="checkbox_label" for="hwr_strategy_custom_enabled">
+                            <input type="checkbox" id="hwr_strategy_custom_enabled">
+                            <span>启用自定义策略补充提示词</span>
+                        </label>
+                        <textarea id="hwr_strategy_custom_prompt" class="text_pole hwr_prompt_textarea" rows="7" maxlength="4000" spellcheck="false" placeholder="例如：查询时优先官方设定集与作品官网；最终回答把考据自然融入角色言行，不单列资料摘要。"></textarea>
+                        <div class="hwr_prompt_status_row">
+                            <div id="hwr_strategy_custom_status" class="hwr_prompt_status" data-state="default" role="status" aria-live="polite"></div>
+                            <div id="hwr_strategy_custom_count" class="hwr_prompt_count">0 / 4000</div>
+                        </div>
+                        <div class="hwr_button_row">
+                            <button id="hwr_save_strategy_custom_prompt" class="menu_button" type="button">
+                                <i class="fa-solid fa-floppy-disk"></i>
+                                <span>保存自定义策略</span>
+                            </button>
+                            <button id="hwr_restore_strategy_custom_prompt" class="menu_button" type="button">
+                                <i class="fa-solid fa-rotate-left"></i>
+                                <span>恢复内置默认</span>
+                            </button>
+                        </div>
+                        <div class="hwr_hint">
+                            自定义内容会随相关隐藏规划请求发送给当前模型，并在有搜索结果时进入本轮最终回答上下文；请勿填写 Key、Token、密码或私人信息。固定的证据安全、引用真实性、禁止伪装厂商原生搜索以及高级查询上限仍优先。恢复默认只清除这份补充词，不会更改上面的模型策略下拉框。
+                        </div>
+                    </div>
+                </details>
             </div>
 
             <label for="hwr_result_transport">搜索结果注入方式</label>
@@ -77,6 +108,36 @@
                 触发策略回答“这一轮是否进入研究流程”。“模型自动判断”会调用当前回答模型作为隐藏规划器：明确搜索、天气、时效信息和推荐等高置信场景由本地门控保证至少搜索一次，其余模糊场景由上面的模型策略判断；即使最后不搜索也会消耗规划 tokens。
                 “每条消息”仍会让规划器先组织查询，但至少执行一次搜索；明确禁止联网和只问本机日期/时间是例外。“仅明确要求联网”会在其他消息上本地零 token 跳过。当前用户明确要求“不联网”始终优先于全部选项。
             </div>
+            <details class="hwr_prompt_editor">
+                <summary>自定义触发判断提示词</summary>
+                <div class="hwr_prompt_editor_body">
+                    <div class="hwr_hint">
+                        只补充隐藏规划器对模糊场景的 SEARCH / DONE 判断，不会改写本地门控：明确“不联网”仍最高优先；“每条消息”和高置信动态场景的首次搜索不能被取消；“仅明确要求联网”未命中时根本不会调用规划器。
+                    </div>
+                    <label class="checkbox_label" for="hwr_trigger_custom_enabled">
+                        <input type="checkbox" id="hwr_trigger_custom_enabled">
+                        <span>启用自定义触发补充提示词</span>
+                    </label>
+                    <textarea id="hwr_trigger_custom_prompt" class="text_pole hwr_prompt_textarea" rows="7" maxlength="4000" spellcheck="false" placeholder="例如：涉及虚构作品的具体原作设定且内部置信度不足时倾向搜索；纯续写、改写或用户已给出设定时不搜索。"></textarea>
+                    <div class="hwr_prompt_status_row">
+                        <div id="hwr_trigger_custom_status" class="hwr_prompt_status" data-state="default" role="status" aria-live="polite"></div>
+                        <div id="hwr_trigger_custom_count" class="hwr_prompt_count">0 / 4000</div>
+                    </div>
+                    <div class="hwr_button_row">
+                        <button id="hwr_save_trigger_custom_prompt" class="menu_button" type="button">
+                            <i class="fa-solid fa-floppy-disk"></i>
+                            <span>保存自定义触发规则</span>
+                        </button>
+                        <button id="hwr_restore_trigger_custom_prompt" class="menu_button" type="button">
+                            <i class="fa-solid fa-rotate-left"></i>
+                            <span>恢复内置默认</span>
+                        </button>
+                    </div>
+                    <div class="hwr_hint">
+                        自定义内容会随被触发的隐藏规划请求发送给当前模型并增加少量输入 tokens；请勿填写 Key、Token、密码或私人信息。恢复默认只清除这份补充词，不会更改触发策略下拉框。
+                    </div>
+                </div>
+            </details>
 
             <div id="hwr_searxng_settings" class="hwr_backend_box">
                 <h4>SearXNG</h4>
@@ -346,6 +407,15 @@
                 </div>
                 <div class="hwr_hint">
                     “规划器 tokens”是通用下限；模型专属提示策略会覆盖较小值：DeepSeek V4 Pro 1024、GLM 5.2 1536、Kimi K3 2048。私有 hwr_planner_profile 服务端标记当前暂停；普通请求参数是否生效由原版酒馆和上游决定。
+                </div>
+                <div class="hwr_hint">
+                    “每轮最多查询”“总查询上限”和“最多规划轮数”是实际执行硬上限；模型策略中的数量只是推荐，不会再暗中压低你填写的数值。
+                </div>
+                <div class="hwr_button_row">
+                    <button id="hwr_restore_advanced_defaults" class="menu_button" type="button">
+                        <i class="fa-solid fa-rotate-left"></i>
+                        <span>恢复高级限制默认值</span>
+                    </button>
                 </div>
                 <label class="checkbox_label" for="hwr_debug">
                     <input type="checkbox" id="hwr_debug">

@@ -64,8 +64,39 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.8.1');
-assert.match(indexSource, /schemaVersion:\s*8/u);
+assert.equal(manifest.version, '1.8.2');
+assert.match(indexSource, /schemaVersion:\s*9/u);
+assert.match(indexSource, /strategyCustomPromptEnabled:\s*false/u);
+assert.match(indexSource, /strategyCustomPrompt:\s*''/u);
+assert.match(indexSource, /triggerCustomPromptEnabled:\s*false/u);
+assert.match(indexSource, /triggerCustomPrompt:\s*''/u);
+assert.match(indexSource, /normalizeCustomPrompt\(settings\.strategyCustomPrompt\)/u);
+assert.match(indexSource, /normalizeCustomPrompt\(settings\.triggerCustomPrompt\)/u);
+assert.match(indexSource, /strategyCustomPromptHash:/u);
+assert.match(indexSource, /triggerCustomPromptHash:/u);
+assert.match(plannerPromptsSource, /LOWER-PRIORITY USER-CONFIGURED TRIGGER GUIDANCE/u);
+assert.match(plannerPromptsSource, /LOWER-PRIORITY USER-CONFIGURED STRATEGY GUIDANCE/u);
+assert.match(plannerPromptsSource, /FIXED TRIGGER DIRECTIVE/u);
+assert.match(plannerPromptsSource, /Number\(round\) === 1 && !evidence\.length && !evaluationOnly && !forceInitialSearch/u);
+assert.match(plannerPromptsSource, /CUSTOM_PROMPT_MAX_CHARS = 4000/u);
+assert.match(indexSource, /containsSensitiveQueryMaterial\(prompt\)/u);
+
+const totalLimitStart = indexSource.indexOf('function getEffectiveTotalQueryLimit');
+const roundLimitStart = indexSource.indexOf('function getEffectiveRoundQueryLimit', totalLimitStart);
+const cleanQueryStart = indexSource.indexOf('function cleanQuery', roundLimitStart);
+const liveLimitSource = indexSource.slice(totalLimitStart, cleanQueryStart);
+assert.match(liveLimitSource, /return settings\.maxTotalQueries/u);
+assert.match(liveLimitSource, /settings\.maxQueriesPerRound/u);
+assert.doesNotMatch(liveLimitSource, /profile\.totalQueryLimit|getStrategyQueryLimit/u);
+assert.match(indexSource, /Math\.min\(settings\.maxTotalQueries, settings\.maxRounds \* settings\.maxQueriesPerRound\)/u);
+assert.match(indexSource, /\['maxRounds', 'maxQueriesPerRound', 'maxTotalQueries'\]\.includes\(key\)/u);
+
+const answerCustomizationStart = indexSource.indexOf('function buildStrategyAnswerCustomization');
+const truncateTextStart = indexSource.indexOf('function truncateText', answerCustomizationStart);
+const answerCustomizationSource = indexSource.slice(answerCustomizationStart, truncateTextStart);
+assert.match(answerCustomizationSource, /settings\.strategyCustomPromptEnabled/u);
+assert.doesNotMatch(answerCustomizationSource, /triggerCustomPrompt/u);
+assert.match(indexSource, /\$\{answerCustomization\}/u);
 assert.match(indexSource, /body:\s*JSON\.stringify\(\{ query \}\)/u);
 assert.match(indexSource, /if \(!isResearchBackendEnabled\(settings\.researchBackend\)/u);
 assert.deepEqual(
@@ -209,6 +240,29 @@ assert.match(visibleSettingsHtml, /id="hwr_result_transport"/u);
 assert.match(visibleSettingsHtml, /隐藏工具结果优先/u);
 assert.match(visibleSettingsHtml, /固定使用隐藏研究包/u);
 assert.match(visibleSettingsHtml, /<option value="serpapi">/u);
+for (const id of [
+    'hwr_strategy_custom_enabled',
+    'hwr_strategy_custom_prompt',
+    'hwr_save_strategy_custom_prompt',
+    'hwr_restore_strategy_custom_prompt',
+    'hwr_strategy_custom_status',
+    'hwr_trigger_custom_enabled',
+    'hwr_trigger_custom_prompt',
+    'hwr_save_trigger_custom_prompt',
+    'hwr_restore_trigger_custom_prompt',
+    'hwr_trigger_custom_status',
+    'hwr_restore_advanced_defaults',
+]) {
+    assert.match(visibleSettingsHtml, new RegExp(`id="${id}"`, 'u'));
+}
+assert.match(visibleSettingsHtml, /maxlength="4000"/u);
+assert.match(visibleSettingsHtml, /实际每轮与总查询硬上限完全由“高级限制”中的数值决定/u);
+assert.match(visibleSettingsHtml, /当前回答模型是 DeepSeek 而手选 Claude，仍由 DeepSeek 执行/u);
+assert.match(indexSource, /bindCustomPromptUi\('strategy'\)/u);
+assert.match(indexSource, /bindCustomPromptUi\('trigger'\)/u);
+assert.match(indexSource, /restoreCustomPromptDefaults/u);
+assert.match(indexSource, /restoreAdvancedSettingsDefaults/u);
+assert.match(indexSource, /invalidateRun\(`\$\{kind\} custom prompt saved`, \{ clearCaches: true \}\)/u);
 for (const backend of SERVER_DEPENDENT_RESEARCH_BACKENDS) {
     assert.doesNotMatch(visibleSettingsHtml, new RegExp(`<option value="${backend}">`, 'u'));
 }

@@ -7,7 +7,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "piggynuggets & Codex",
-    "version": "1.8.1",
+    "version": "1.8.2",
     "minimum_client_version": "1.18.0",
     "generate_interceptor": "HiddenWebResearch_Intercept",
     "auto_update": false

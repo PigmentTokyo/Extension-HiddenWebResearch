@@ -34,36 +34,36 @@ const PLANNER_STYLE_INSTRUCTIONS = Object.freeze({
     claude: [
         'Apply a Claude-inspired policy reconstructed from public tool behavior; never claim this is Anthropic private wording or a native Anthropic tool call.',
         'Use a cautious knowledge-first necessity check: search for an explicit browse request; current, changing, live, or plausibly outdated facts; material high-precision facts where freshness, attribution, or error risk matters; exact sources or quotations; or a material low-confidence knowledge gap.',
-        'Start with exactly one highest-value precise query and prefer the responsible primary source. Do not split a request into many fields.',
-        'In each later round, issue at most one sequential follow-up for a concrete unresolved fact, contradiction, or recency gap. Stop as soon as the evidence is sufficient.',
+        'The profile recommendation is one highest-value precise first query, preferably aimed at the responsible primary source. Use more in the same round only when the configured query budget permits and genuinely independent facets make that materially better; never split mechanically by requested field.',
+        'The profile recommendation for later rounds is one sequential follow-up for the most important unresolved fact, contradiction, or recency gap. Additional configured capacity is optional, not a target. Stop as soon as the evidence is sufficient.',
     ].join(' '),
     gemini: [
         'Apply a Gemini-inspired policy reconstructed from public Google Search behavior; never claim this is Google private wording or native Google grounding.',
         'Use a grounding-improvement check: search only when external retrieval would materially improve factual accuracy, freshness, attribution, specificity, or completeness.',
         'Do not search merely because more detail could be found when reliable internal knowledge or supplied context is already sufficient.',
         'Convert the information need into concise, high-intent, standalone search queries instead of copying the user sentence.',
-        'The first round may contain two queries only when they are genuinely complementary independent facets; otherwise use one.',
-        'Later rounds may contain only the single highest-value gap-filling query. Stop when the material requested information is supported.',
+        'The profile recommendation is one first-round query, or two when they are genuinely complementary independent facets. A larger configured query budget may be used only when additional independent facets have clear information value.',
+        'The profile recommendation for later rounds is the single highest-value gap-filling query. Additional configured capacity is optional, not a target. Stop when the material requested information is supported.',
     ].join(' '),
     'deepseek-v4-pro': [
         'Map the material factual facets, then consolidate closely related facets into the fewest queries.',
-        'The first round may contain at most two queries: one consolidated, high-intent primary or official-source query covering closely related facets when an authority is inferable, plus one genuinely orthogonal verification query when necessary. Do not make the consolidated query vague or overstuffed.',
-        'Do not create one query per requested field. After evidence arrives, select only the unresolved gap with the highest information gain and stop once coverage is sufficient.',
+        'The profile recommends up to two first-round queries: one consolidated, high-intent primary or official-source query covering closely related facets when an authority is inferable, plus one genuinely orthogonal verification query when necessary. A larger configured budget may cover additional independent facets, but the consolidated query must not become vague or overstuffed.',
+        'Do not create one query per requested field. After evidence arrives, prioritize unresolved gaps by information gain; use additional configured capacity only when multiple material independent gaps remain, and stop once coverage is sufficient.',
     ].join(' '),
     'glm-5.2': [
         'Plan hierarchically from scope to authority to unresolved layer.',
-        'When one exists, begin with an authoritative hub, regulator, standards body, or official summary that can cover the top-level question; use a second first-round query only for an orthogonal jurisdiction, definition, implementation detail, timeline, or statistical scope.',
-        'Preserve official terminology and track date, jurisdiction, and measurement-scope mismatches. Each later round may verify only one unresolved layer.',
+        'When one exists, begin with an authoritative hub, regulator, standards body, or official summary that can cover the top-level question; the profile recommends a second first-round query only for an orthogonal jurisdiction, definition, implementation detail, timeline, or statistical scope. A larger configured budget may cover further independent layers.',
+        'Preserve official terminology and track date, jurisdiction, and measurement-scope mismatches. Later rounds should normally verify one unresolved layer; additional configured capacity is optional and must address separate material layers.',
     ].join(' '),
     'kimi-k3': [
         'Optimize for the minimum sufficient evidence set and aggressive convergence.',
-        'Infer the responsible authority or domain when possible; use one authority-specific or site-restricted primary query, plus at most one orthogonal verification query in the first round.',
-        'Do not branch into a deep-research tree. Reuse gathered evidence, request only the single most valuable gap-filling follow-up, and stop immediately when the material information needs are covered.',
+        'Infer the responsible authority or domain when possible; the profile recommends one authority-specific or site-restricted primary query, plus one orthogonal verification query when useful. Use any larger configured budget only for material independent evidence gaps.',
+        'Do not branch into a deep-research tree. Reuse gathered evidence, normally request the single most valuable gap-filling follow-up, and stop immediately when the material information needs are covered.',
     ].join(' '),
     other: [
         'Use a conservative knowledge-first loop.',
         'Search only when external evidence would materially improve factual accuracy, freshness, specificity, or verification.',
-        'Choose one precise, high-value query at a time, prefer primary sources, and stop as soon as the evidence is sufficient.',
+        'The profile recommends one precise, high-value query at a time and primary sources. A larger configured budget may be used for genuinely independent material gaps; stop as soon as the evidence is sufficient.',
     ].join(' '),
 });
 
@@ -107,9 +107,9 @@ const TARGET_MODEL_PATTERNS = Object.freeze([
 const DOMESTIC_MODEL_FAMILY_PATTERN = /(?:deepseek|(?:^|[^a-z0-9])(?:glm|kimi|moonshotai)(?:$|[^a-z0-9]))/iu;
 
 /**
- * Query-shaping limits derived from the observed native-search styles.
- * Later rounds stay sequential so that every follow-up addresses a concrete
- * evidence gap instead of producing progressively narrower synonyms.
+ * Query-shaping recommendations derived from observed native-search styles.
+ * Runtime enforcement is intentionally owned by the user-configured advanced
+ * limits; these values guide economical defaults and strategy diagnostics.
  */
 export const RESEARCH_STRATEGY_PROFILES = Object.freeze({
     claude: Object.freeze({
@@ -400,6 +400,7 @@ export function getResearchCitationInstruction(includeSourceLinks = true) {
 }
 
 /**
+ * Returns the profile's economical per-round query recommendation.
  * @param {unknown} strategy Strategy name or provider alias.
  * @param {number} round One-based research round.
  * @returns {number}
@@ -410,7 +411,8 @@ export function getStrategyQueryLimit(strategy, round = 1) {
 }
 
 /**
- * Applies a strategy's per-round query cap without mutating the input.
+ * Applies a strategy recommendation to a standalone candidate list without
+ * mutating it. The live research loop uses the user's advanced limits instead.
  *
  * @param {unknown[]} queries Candidate queries.
  * @param {unknown} strategy Strategy name or provider alias.
