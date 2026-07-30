@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-30T12:42:23+09:00",
+  "benchmark": "opus5-web-search-20260318-minimum-wage",
+  "model": "claude-opus-5",
+  "promptFingerprint": "55222a7d0409f90a",
+  "tool": {
+    "type": "web_search_20260318",
+    "maxUses": 8,
+    "allowedDomainCount": 1
+  },
+  "safety": {
+    "localEndpointOnly": true,
+    "rawCredentialPersisted": false,
+    "rawResponsePersisted": false,
+    "answerTextPersisted": false,
+    "queryTextPersisted": false,
+    "urlsPersisted": false
+  },
+  "conditions": [
+    {
+      "mode": "dynamic-default",
+      "allowedCallers": "omitted",
+      "attempts": 2,
+      "toolVersionAccepted": true,
+      "actualSearchSucceeded": false,
+      "finalStopReason": "end_turn",
+      "blockTypes": [
+        "thinking",
+        "server_tool_use:code_execution",
+        "code_execution_tool_result",
+        "thinking",
+        "text"
+      ],
+      "dynamicExecution": {
+        "codeInputFingerprint": "28f1e743aed923f6",
+        "codeInputCodePoints": 279,
+        "errorCode": "too_many_requests",
+        "sameFailureClassObservedTwice": true
+      },
+      "search": {
+        "webSearchRequests": 0,
+        "querySequence": [],
+        "resultRecords": 0,
+        "citations": 0
+      },
+      "contentMetrics": {
+        "textBlocks": 1,
+        "textCodePoints": 261,
+        "thinkingBlocks": 2
+      },
+      "usage": {
+        "inputTokens": 686,
+        "outputTokens": 844,
+        "cacheCreationInputTokens": 0,
+        "cacheReadInputTokens": 12896,
+        "cacheCreation": {
+          "ephemeral5mInputTokens": 0,
+          "ephemeral1hInputTokens": 0
+        },
+        "serverToolUse": {
+          "webSearchRequests": 0,
+          "webFetchRequests": 0
+        }
+      }
+    },
+    {
+      "mode": "direct-only",
+      "allowedCallers": [
+        "direct"
+      ],
+      "attempts": 1,
+      "toolVersionAccepted": true,
+      "actualSearchSucceeded": true,
+      "finalStopReason": "end_turn",
+      "blockTypes": [
+        "thinking",
+        "server_tool_use:web_search",
+        "server_tool_use:web_search",
+        "web_search_tool_result",
+        "web_search_tool_result",
+        "text",
+        "text",
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "search": {
+        "webSearchRequests": 2,
+        "querySequence": [
+          {
+            "order": 1,
+            "fingerprint": "3d589111160e9845",
+            "codePoints": 18,
+            "utf8Bytes": 48,
+            "whitespaceTerms": 3
+          },
+          {
+            "order": 2,
+            "fingerprint": "029e39febef6c408",
+            "codePoints": 24,
+            "utf8Bytes": 54,
+            "whitespaceTerms": 5
+          }
+        ],
+        "resultBlocks": 2,
+        "resultRecords": 20,
+        "resultErrors": 0,
+        "uniqueResultUrls": 15,
+        "duplicateResultUrls": 5
+      },
+      "citations": {
+        "total": 3,
+        "typeCounts": {
+          "web_search_result_location": 3
+        },
+        "uniqueReferencedUrls": 1,
+        "citedTextCodePoints": 459,
+        "encryptedIndexes": 3
+      },
+      "contentMetrics": {
+        "textBlocks": 7,
+        "textCodePoints": 364,
+        "thinkingBlocks": 1
+      },
+      "usage": {
+        "inputTokens": 186,
+        "outputTokens": 715,
+        "cacheCreationInputTokens": 20992,
+        "cacheReadInputTokens": 3166,
+        "cacheCreation": {
+          "ephemeral5mInputTokens": 20992,
+          "ephemeral1hInputTokens": 0
+        },
+        "serverToolUse": {
+          "webSearchRequests": 2,
+          "webFetchRequests": 0
+        }
+      },
+      "elapsedMs": 16355
+    }
+  ]
+}

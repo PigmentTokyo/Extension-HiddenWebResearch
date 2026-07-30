@@ -1,0 +1,25 @@
+# Credentials and machine-local configuration
+.env
+.env.*
+!.env.example
+*.txt
+*.key
+*.pem
+*.p12
+secrets.json
+
+# Runtime and test output
+*.log
+.hwr-*
+node_modules/
+coverage/
+.nyc_output/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.tmp

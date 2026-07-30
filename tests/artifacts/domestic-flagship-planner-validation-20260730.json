@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-30",
+  "scenario": "sanitized-first-round-authoritative-source-planning",
+  "queryLimit": 2,
+  "rawCredentialsPersisted": false,
+  "rawResponsesPersisted": false,
+  "queryTextPersisted": false,
+  "reasoningPersisted": false,
+  "results": [
+    {
+      "profile": "deepseek-v4-pro",
+      "httpStatus": 200,
+      "responseModel": "deepseek-v4-pro",
+      "structuredMode": "json_object",
+      "jsonParsed": true,
+      "action": "SEARCH",
+      "queryCount": 2,
+      "withinProfileLimit": true,
+      "elapsedMs": 2822,
+      "promptTokens": 306,
+      "completionTokens": 143,
+      "totalTokens": 449
+    },
+    {
+      "profile": "glm-5.2",
+      "httpStatus": 200,
+      "responseModel": "glm-5-2-260617",
+      "structuredMode": "json_object",
+      "jsonParsed": true,
+      "action": "SEARCH",
+      "queryCount": 2,
+      "withinProfileLimit": true,
+      "elapsedMs": 9947,
+      "promptTokens": 289,
+      "completionTokens": 537,
+      "totalTokens": 826
+    },
+    {
+      "profile": "kimi-k3",
+      "httpStatus": 200,
+      "responseModel": "kimi-k3",
+      "structuredMode": "json_schema_strict",
+      "jsonParsed": true,
+      "action": "SEARCH",
+      "queryCount": 2,
+      "withinProfileLimit": true,
+      "elapsedMs": 19624,
+      "promptTokens": 538,
+      "completionTokens": 516,
+      "totalTokens": 1054
+    }
+  ]
+}
