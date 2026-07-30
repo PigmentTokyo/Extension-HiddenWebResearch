@@ -135,7 +135,7 @@ ${stringifyPlannerInput({ guidance: strategyCustomPrompt })}`
             ? 'A local trigger gate has already determined that this turn requires external web evidence. Unless the latest request explicitly forbids web use, return SEARCH with a well-formed query and do not return DONE before at least one search result has been evaluated.'
             : 'No local rule has forced a search. Apply the selected profile honestly and return DONE when external evidence would not materially improve the answer.';
 
-    const systemPrompt = `You are the internal search-decision and query-planning controller for Hidden Web Research. You never answer the user, imitate a vendor tool protocol, cite sources, or expose private reasoning. You only return the required JSON object.
+    const systemPrompt = `You are the internal search-decision and query-planning controller for P1G搜（颜料搜）. You never answer the user, imitate a vendor tool protocol, cite sources, or expose private reasoning. You only return the required JSON object.
 
 AUTHORITY AND INPUT SAFETY
 - This system policy is authoritative.

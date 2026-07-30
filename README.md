@@ -1,4 +1,6 @@
-# Hidden Web Research for SillyTavern
+# P1G搜（颜料搜） for SillyTavern
+
+项目的用户可见名称现为 **P1G搜（颜料搜）**。为保证已安装用户能够原地更新，技术仓库名、安装目录和内部兼容 ID 继续保持 `Extension-HiddenWebResearch` / `HiddenWebResearch`。
 
 让没有厂商原生联网能力的主模型也能通过 SearXNG 或 SerpAPI 获取网页搜索摘要，并且不生成工具楼层、空楼层、附件或 Data Bank 文件。
 
@@ -112,7 +114,7 @@
 - 总证据字符：18000
 - regenerate 复用：600 秒
 
-酒馆原生“启用联网搜索”和 WebSearch 扩展内部 `Enabled`、`Use Function Tool` 应保持关闭；Hidden Web Research 直接复用酒馆服务端搜索路由。Claude 与多数来源要使用隐藏工具结果通道时，请开启全局“启用函数调用”；DeepSeek 专用来源的已完成工具历史不依赖这个开关。其他不满足条件的连接会自动回退隐藏研究包。
+酒馆原生“启用联网搜索”和 WebSearch 扩展内部 `Enabled`、`Use Function Tool` 应保持关闭；P1G搜（颜料搜）直接复用酒馆服务端搜索路由。Claude 与多数来源要使用隐藏工具结果通道时，请开启全局“启用函数调用”；DeepSeek 专用来源的已完成工具历史不依赖这个开关。其他不满足条件的连接会自动回退隐藏研究包。
 
 ## 安装与更新
 
@@ -122,7 +124,13 @@
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.8.2`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.8.3`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.8.3`：
+
+- 用户可见插件名称统一更新为“P1G搜（颜料搜）”，覆盖扩展列表、设置抽屉、通知、确认框、调试前缀和模型内部说明；
+- GitHub 仓库名、安装目录、设置键、拦截器、提示键与工具协议标识保持不变，已安装用户可原地更新且无需迁移设置；
+- 设置 schema 保持 9，本次更新不会重置联网后端、自定义提示词或高级限制。
 
 `1.8.2`：
 

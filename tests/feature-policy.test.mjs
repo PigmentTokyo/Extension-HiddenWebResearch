@@ -60,11 +60,21 @@ assert.deepEqual(resolveResearchBackendSelection('unknown', true), {
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const plannerPromptsSource = await readFile(new URL('../planner-prompts.js', import.meta.url), 'utf8');
 const querySafetySource = await readFile(new URL('../query-safety.js', import.meta.url), 'utf8');
+const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.8.2');
+assert.equal(manifest.version, '1.8.3');
+assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
+assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
+assert.match(visibleSettingsHtml, /<b>P1G搜（颜料搜）<\/b>/u);
+assert.match(indexSource, /const DISPLAY_NAME = 'P1G搜（颜料搜）'/u);
+assert.match(indexSource, /const EXTENSION_ID = 'third-party\/Extension-HiddenWebResearch'/u);
+assert.match(indexSource, /const SETTINGS_KEY = 'hiddenWebResearch'/u);
+assert.match(indexSource, /const PROMPT_KEY = '___HiddenWebResearch___'/u);
+assert.match(readme, /^# P1G搜（颜料搜） for SillyTavern$/mu);
+assert.match(readme, /https:\/\/github\.com\/PigmentTokyo\/Extension-HiddenWebResearch/u);
 assert.match(indexSource, /schemaVersion:\s*9/u);
 assert.match(indexSource, /strategyCustomPromptEnabled:\s*false/u);
 assert.match(indexSource, /strategyCustomPrompt:\s*''/u);
