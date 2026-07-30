@@ -22,6 +22,7 @@ import {
 } from '../../../secrets.js';
 import {
     evaluateNativeResearchGate,
+    hasExplicitNoSearchIntent,
     hasExplicitSearchIntent,
 } from './research-gate.js';
 import {
@@ -39,6 +40,12 @@ import {
     mergeStructuredSourceBatch,
     parsePlannerDecision,
 } from './research-strategies.js';
+import {
+    ENABLE_SERVER_DEPENDENT_FEATURES,
+    getEnabledResearchBackends,
+    isResearchBackendEnabled,
+    resolveResearchBackendSelection,
+} from './feature-policy.js';
 
 const EXTENSION_ID = 'third-party/Extension-HiddenWebResearch';
 const SETTINGS_KEY = 'hiddenWebResearch';
@@ -54,12 +61,12 @@ const ADAPTERS = new Set([
     'other',
 ]);
 const SEARCH_POLICIES = new Set(['auto', 'always', 'explicit']);
-const RESEARCH_BACKENDS = new Set(['searxng', 'anysearch', 'serpapi', 'claude_profile', 'gemini_profile']);
+const RESEARCH_BACKENDS = new Set(getEnabledResearchBackends());
 const CONNECTION_MODES = new Set(['profile', 'direct']);
 const HANDLED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe']);
 
 const defaultSettings = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     enabled: false,
     adapter: 'auto',
     searchPolicy: 'auto',
@@ -103,6 +110,7 @@ const queryCache = new Map();
 let runEpoch = 0;
 let activeRunEpoch = null;
 let activeAbortController = null;
+let pausedBackendMigration = '';
 
 /**
  * @typedef {Object} SearchItem
@@ -177,8 +185,13 @@ function normalizeSettings(settings) {
 
     if (!ADAPTERS.has(settings.adapter)) setValue('adapter', defaultSettings.adapter);
     if (!SEARCH_POLICIES.has(settings.searchPolicy)) setValue('searchPolicy', defaultSettings.searchPolicy);
-    if (!RESEARCH_BACKENDS.has(settings.researchBackend)) setValue('researchBackend', defaultSettings.researchBackend);
     setValue('enabled', Boolean(settings.enabled));
+    const backendResolution = resolveResearchBackendSelection(settings.researchBackend, settings.enabled);
+    if (backendResolution.paused) {
+        pausedBackendMigration = backendResolution.requestedBackend;
+    }
+    setValue('researchBackend', backendResolution.researchBackend);
+    setValue('enabled', backendResolution.enabled);
     setValue('searxngUrl', String(settings.searxngUrl || '').trim());
     setValue('searxngPreferences', String(settings.searxngPreferences || '').trim());
     setValue('anysearchZone', ['', 'cn', 'intl'].includes(settings.anysearchZone) ? settings.anysearchZone : '');
@@ -974,7 +987,10 @@ function applyPlannerRequestTuning(request, adapter) {
     const tuning = getPlannerRequestTuning(adapter);
     if (!tuning || !request || typeof request !== 'object') return;
     if (!JSON.stringify(request.messages || '').includes(`<hwr_planner_profile>${adapter}</hwr_planner_profile>`)) return;
-    request.hwr_planner_profile = adapter;
+    // The private planner marker is understood only by the paused server adapter.
+    if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+        request.hwr_planner_profile = adapter;
+    }
     request.include_reasoning = tuning.includeReasoning;
     if (!tuning.reasoningEffort) delete request.reasoning_effort;
     if (tuning.reasoningEffort) request.reasoning_effort = tuning.reasoningEffort;
@@ -1171,14 +1187,10 @@ function getAnySearchConfig(settings = getSettings()) {
     };
 }
 
-function getSerpApiConfig(settings = getSettings()) {
-    const country = String(settings.serpapiCountry || '').trim().toLowerCase();
-    if (country && !/^[a-z]{2}$/u.test(country)) {
-        throw new Error('SerpAPI gl 必须是两个字母的国家代码');
-    }
+function getSerpApiConfig() {
+    // Stock SillyTavern uses only the active shared key and the query. Enhanced
+    // hl/gl and explicit secret selection remain paused with the server adapter.
     return {
-        language: normalizeOptionalLanguageCode(settings.serpapiLanguage, 'SerpAPI hl').toLowerCase(),
-        country,
         secretId: getActiveSearchApiSecret('serpapi')?.id || '',
     };
 }
@@ -1374,6 +1386,9 @@ function getSearchApiFailureMessage(provider, status) {
 }
 
 async function searchAnySearch(query, settings) {
+    if (!ENABLE_SERVER_DEPENDENT_FEATURES) {
+        throw new Error('AnySearch is paused because it requires a server adapter');
+    }
     const config = getAnySearchConfig(settings);
     const cacheKey = `anysearch\n${config.zone}\n${config.language}\n${config.secretId || 'anonymous'}\n${query.toLowerCase()}\n${settings.maxResultsPerQuery}\n${settings.maxCharsPerQuery}\n${settings.includeSourceLinks}`;
     const cached = queryCache.get(cacheKey);
@@ -1427,7 +1442,7 @@ async function searchSerpApi(query, settings) {
     if (!config.secretId) {
         throw new Error('尚未保存 SerpAPI Key');
     }
-    const cacheKey = `serpapi\n${config.language}\n${config.country}\n${config.secretId}\n${query.toLowerCase()}\n${settings.maxResultsPerQuery}\n${settings.maxCharsPerQuery}\n${settings.includeSourceLinks}`;
+    const cacheKey = `serpapi\n${config.secretId}\n${query.toLowerCase()}\n${settings.maxResultsPerQuery}\n${settings.maxCharsPerQuery}\n${settings.includeSourceLinks}`;
     const cached = queryCache.get(cacheKey);
     if (cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()) {
         return cached.result;
@@ -1436,12 +1451,9 @@ async function searchSerpApi(query, settings) {
     const response = await runAbortableRequest(signal => fetch('/api/search/serpapi', {
         method: 'POST',
         headers: getRequestHeaders(),
-        body: JSON.stringify({
-            query,
-            hl: config.language,
-            gl: config.country,
-            secret_id: config.secretId,
-        }),
+        // Stock SillyTavern's SerpAPI route reliably accepts only the query and
+        // always uses the currently active shared SerpAPI key.
+        body: JSON.stringify({ query }),
         signal,
     }), settings.requestTimeoutMs);
 
@@ -1477,9 +1489,15 @@ async function searchSerpApi(query, settings) {
 }
 
 async function searchStructuredBackend(query, settings) {
-    if (settings.researchBackend === 'anysearch') return searchAnySearch(query, settings);
+    if (settings.researchBackend === 'anysearch') {
+        if (!ENABLE_SERVER_DEPENDENT_FEATURES) {
+            throw new Error('AnySearch is unavailable without the paused server adapter');
+        }
+        return searchAnySearch(query, settings);
+    }
     if (settings.researchBackend === 'serpapi') return searchSerpApi(query, settings);
-    return searchSearxng(query, settings);
+    if (settings.researchBackend === 'searxng') return searchSearxng(query, settings);
+    throw new Error(`Unsupported research backend: ${settings.researchBackend}`);
 }
 
 function buildResearchPacket({
@@ -1541,6 +1559,11 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings }) {
     if (!latestUser) return null;
 
     const userText = normalizeWhitespace(latestUser.mes);
+    if (hasExplicitNoSearchIntent(userText)) {
+        updateStatus('idle', '已遵从本条不联网要求（未调用规划器或搜索服务）');
+        return null;
+    }
+
     const explicitSearch = hasExplicitSearchIntent(userText);
     if (settings.searchPolicy === 'explicit' && !explicitSearch) {
         updateStatus('idle', '本条消息未显式要求搜索');
@@ -2244,6 +2267,13 @@ async function runGeminiProfileAnswer({ chat, chatId, epoch, settings }) {
 async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration, type) {
     clearPrompt();
     const settings = getSettings();
+    if (!isResearchBackendEnabled(settings.researchBackend) || !RESEARCH_BACKENDS.has(settings.researchBackend)) {
+        settings.enabled = false;
+        settings.researchBackend = defaultSettings.researchBackend;
+        saveSettingsDebounced();
+        updateStatus('paused', '原联网模式需要服务端适配，已停止本轮并关闭扩展');
+        return;
+    }
     if (!settings.enabled || !HANDLED_GENERATION_TYPES.has(type)) {
         return;
     }
@@ -2260,7 +2290,7 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
     const epoch = ++runEpoch;
     activeRunEpoch = epoch;
     try {
-        if (settings.researchBackend === 'gemini_profile') {
+        if (ENABLE_SERVER_DEPENDENT_FEATURES && settings.researchBackend === 'gemini_profile') {
             const result = await runGeminiProfileAnswer({ chat, chatId, epoch, settings });
             if (!result || !isRunCurrent(epoch, chatId)) return;
             await publishGeminiGroundedAnswer(result.extracted, result.profile, type);
@@ -2273,7 +2303,7 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
             return;
         }
 
-        const packet = settings.researchBackend === 'claude_profile'
+        const packet = ENABLE_SERVER_DEPENDENT_FEATURES && settings.researchBackend === 'claude_profile'
             ? await runClaudeProfileResearch({ chat, chatId, epoch, settings })
             : await runStructuredSearchResearch({ chat, chatId, epoch, settings });
         if (!packet || !isRunCurrent(epoch, chatId)) return;
@@ -2311,12 +2341,12 @@ function bindNumberSetting(selector, key) {
 function switchBackendUi() {
     const backend = getSettings().researchBackend;
     $('#hwr_searxng_settings').toggle(backend === 'searxng');
-    $('#hwr_anysearch_settings').toggle(backend === 'anysearch');
     $('#hwr_serpapi_settings').toggle(backend === 'serpapi');
-    $('#hwr_claude_profile_settings').toggle(backend === 'claude_profile');
-    $('#hwr_gemini_profile_settings').toggle(backend === 'gemini_profile');
+    $('#hwr_anysearch_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'anysearch');
+    $('#hwr_claude_profile_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'claude_profile');
+    $('#hwr_gemini_profile_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'gemini_profile');
     $('#hwr_source_links_label').toggle(backend !== 'gemini_profile');
-    $('#hwr_adapter_block').toggle(['searxng', 'anysearch', 'serpapi'].includes(backend));
+    $('#hwr_adapter_block').toggle(['searxng', 'serpapi', ...(ENABLE_SERVER_DEPENDENT_FEATURES ? ['anysearch'] : [])].includes(backend));
 }
 
 async function testStructuredSearchConnection(backend) {
@@ -2405,6 +2435,7 @@ function bindSettingsUi() {
     $('#hwr_research_backend').val(settings.researchBackend).on('change', function () {
         settings.researchBackend = String($(this).val());
         normalizeSettings(settings);
+        $(this).val(settings.researchBackend);
         invalidateRun('Research backend changed');
         switchBackendUi();
         saveSettingsDebounced();
@@ -2419,85 +2450,89 @@ function bindSettingsUi() {
         invalidateRun('SearXNG preferences changed');
         saveSettingsDebounced();
     });
-    $('#hwr_anysearch_zone').val(settings.anysearchZone).on('change', function () {
-        settings.anysearchZone = String($(this).val() || '');
-        normalizeSettings(settings);
-        invalidateRun('AnySearch zone changed', { clearCaches: true });
-        saveSettingsDebounced();
-    });
-    $('#hwr_anysearch_language').val(settings.anysearchLanguage).on('change', function () {
-        settings.anysearchLanguage = String($(this).val() || '').trim();
-        normalizeSettings(settings);
-        $(this).val(settings.anysearchLanguage);
-        invalidateRun('AnySearch language changed', { clearCaches: true });
-        saveSettingsDebounced();
-    });
-    $('#hwr_serpapi_language').val(settings.serpapiLanguage).on('change', function () {
-        settings.serpapiLanguage = String($(this).val() || '').trim();
-        normalizeSettings(settings);
-        $(this).val(settings.serpapiLanguage);
-        invalidateRun('SerpAPI language changed', { clearCaches: true });
-        saveSettingsDebounced();
-    });
-    $('#hwr_serpapi_country').val(settings.serpapiCountry).on('change', function () {
-        settings.serpapiCountry = String($(this).val() || '').trim();
-        normalizeSettings(settings);
-        $(this).val(settings.serpapiCountry);
-        invalidateRun('SerpAPI country changed', { clearCaches: true });
-        saveSettingsDebounced();
-    });
-    $('#hwr_claude_connection_mode').val(settings.claudeConnectionMode).on('change', function () {
-        settings.claudeConnectionMode = String($(this).val() || 'profile');
-        normalizeSettings(settings);
-        invalidateRun('Claude connection mode changed', { clearCaches: true });
-        switchProviderConnectionUi('claude');
-        saveSettingsDebounced();
-    });
-    $('#hwr_gemini_connection_mode').val(settings.geminiConnectionMode).on('change', function () {
-        settings.geminiConnectionMode = String($(this).val() || 'profile');
-        normalizeSettings(settings);
-        invalidateRun('Gemini connection mode changed', { clearCaches: true });
-        switchProviderConnectionUi('gemini');
-        saveSettingsDebounced();
-    });
-    $('#hwr_claude_direct_url').val(settings.claudeDirectUrl || 'https://api.anthropic.com/v1');
-    $('#hwr_claude_direct_model').val(settings.claudeDirectModel);
-    $('#hwr_gemini_direct_url').val(settings.geminiDirectUrl || 'https://generativelanguage.googleapis.com');
-    $('#hwr_gemini_direct_model').val(settings.geminiDirectModel);
-    for (const provider of ['claude', 'gemini']) {
-        const definition = getDirectProviderDefinition(provider);
-        $(`${definition.urlSelector}, ${definition.keySelector}`).on('input', () => {
-            updateDirectCredentialStatus(provider, '有未保存修改');
-            clearDirectModelList(provider, '连接信息已修改；请重新拉取模型列表，或继续手工填写。');
+    if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+        $('#hwr_anysearch_zone').val(settings.anysearchZone).on('change', function () {
+            settings.anysearchZone = String($(this).val() || '');
+            normalizeSettings(settings);
+            invalidateRun('AnySearch zone changed', { clearCaches: true });
+            saveSettingsDebounced();
         });
-        $(definition.modelSelector).on('input', () => {
-            updateDirectCredentialStatus(provider, '有未保存修改');
+        $('#hwr_anysearch_language').val(settings.anysearchLanguage).on('change', function () {
+            settings.anysearchLanguage = String($(this).val() || '').trim();
+            normalizeSettings(settings);
+            $(this).val(settings.anysearchLanguage);
+            invalidateRun('AnySearch language changed', { clearCaches: true });
+            saveSettingsDebounced();
         });
+        $('#hwr_serpapi_language').val(settings.serpapiLanguage).on('change', function () {
+            settings.serpapiLanguage = String($(this).val() || '').trim();
+            normalizeSettings(settings);
+            $(this).val(settings.serpapiLanguage);
+            invalidateRun('SerpAPI language changed', { clearCaches: true });
+            saveSettingsDebounced();
+        });
+        $('#hwr_serpapi_country').val(settings.serpapiCountry).on('change', function () {
+            settings.serpapiCountry = String($(this).val() || '').trim();
+            normalizeSettings(settings);
+            $(this).val(settings.serpapiCountry);
+            invalidateRun('SerpAPI country changed', { clearCaches: true });
+            saveSettingsDebounced();
+        });
+        $('#hwr_claude_connection_mode').val(settings.claudeConnectionMode).on('change', function () {
+            settings.claudeConnectionMode = String($(this).val() || 'profile');
+            normalizeSettings(settings);
+            invalidateRun('Claude connection mode changed', { clearCaches: true });
+            switchProviderConnectionUi('claude');
+            saveSettingsDebounced();
+        });
+        $('#hwr_gemini_connection_mode').val(settings.geminiConnectionMode).on('change', function () {
+            settings.geminiConnectionMode = String($(this).val() || 'profile');
+            normalizeSettings(settings);
+            invalidateRun('Gemini connection mode changed', { clearCaches: true });
+            switchProviderConnectionUi('gemini');
+            saveSettingsDebounced();
+        });
+        $('#hwr_claude_direct_url').val(settings.claudeDirectUrl || 'https://api.anthropic.com/v1');
+        $('#hwr_claude_direct_model').val(settings.claudeDirectModel);
+        $('#hwr_gemini_direct_url').val(settings.geminiDirectUrl || 'https://generativelanguage.googleapis.com');
+        $('#hwr_gemini_direct_model').val(settings.geminiDirectModel);
+        for (const provider of ['claude', 'gemini']) {
+            const definition = getDirectProviderDefinition(provider);
+            $(`${definition.urlSelector}, ${definition.keySelector}`).on('input', () => {
+                updateDirectCredentialStatus(provider, '有未保存修改');
+                clearDirectModelList(provider, '连接信息已修改；请重新拉取模型列表，或继续手工填写。');
+            });
+            $(definition.modelSelector).on('input', () => {
+                updateDirectCredentialStatus(provider, '有未保存修改');
+            });
+        }
+        $('#hwr_save_claude_direct').on('click', () => saveDirectConnection('claude'));
+        $('#hwr_save_gemini_direct').on('click', () => saveDirectConnection('gemini'));
+        $('#hwr_fetch_claude_models').on('click', () => fetchDirectModelList('claude'));
+        $('#hwr_fetch_gemini_models').on('click', () => fetchDirectModelList('gemini'));
+        $('#hwr_clear_claude_direct').on('click', () => clearDirectCredential('claude'));
+        $('#hwr_clear_gemini_direct').on('click', () => clearDirectCredential('gemini'));
     }
-    $('#hwr_save_claude_direct').on('click', () => saveDirectConnection('claude'));
-    $('#hwr_save_gemini_direct').on('click', () => saveDirectConnection('gemini'));
-    $('#hwr_fetch_claude_models').on('click', () => fetchDirectModelList('claude'));
-    $('#hwr_fetch_gemini_models').on('click', () => fetchDirectModelList('gemini'));
-    $('#hwr_clear_claude_direct').on('click', () => clearDirectCredential('claude'));
-    $('#hwr_clear_gemini_direct').on('click', () => clearDirectCredential('gemini'));
-    for (const provider of ['anysearch', 'serpapi']) {
-        const definition = getSearchApiDefinition(provider);
-        $(definition.keySelector).on('input', () => updateSearchApiCredentialStatus(provider, '有未保存的 Key'));
-    }
-    $('#hwr_save_anysearch_key').on('click', () => saveSearchApiKey('anysearch'));
-    $('#hwr_clear_anysearch_key').on('click', () => clearSearchApiKey('anysearch'));
+    const serpApiDefinition = getSearchApiDefinition('serpapi');
+    $(serpApiDefinition.keySelector).on('input', () => updateSearchApiCredentialStatus('serpapi', '有未保存的 Key'));
     $('#hwr_save_serpapi_key').on('click', () => saveSearchApiKey('serpapi'));
     $('#hwr_clear_serpapi_key').on('click', () => clearSearchApiKey('serpapi'));
-    $('#hwr_claude_profile').on('change', function () {
-        settings.claudeProfileId = String($(this).val() || '');
-        invalidateRun('Claude profile changed');
-        saveSettingsDebounced();
-    });
-    $('#hwr_gemini_profile').on('change', function () {
-        settings.geminiProfileId = String($(this).val() || '');
-        invalidateRun('Gemini profile changed');
-        saveSettingsDebounced();
-    });
+    if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+        const anySearchDefinition = getSearchApiDefinition('anysearch');
+        $(anySearchDefinition.keySelector).on('input', () => updateSearchApiCredentialStatus('anysearch', '有未保存的 Key'));
+        $('#hwr_save_anysearch_key').on('click', () => saveSearchApiKey('anysearch'));
+        $('#hwr_clear_anysearch_key').on('click', () => clearSearchApiKey('anysearch'));
+        $('#hwr_claude_profile').on('change', function () {
+            settings.claudeProfileId = String($(this).val() || '');
+            invalidateRun('Claude profile changed');
+            saveSettingsDebounced();
+        });
+        $('#hwr_gemini_profile').on('change', function () {
+            settings.geminiProfileId = String($(this).val() || '');
+            invalidateRun('Gemini profile changed');
+            saveSettingsDebounced();
+        });
+    }
     $('#hwr_include_source_links').prop('checked', settings.includeSourceLinks).on('change', function () {
         settings.includeSourceLinks = Boolean($(this).prop('checked'));
         invalidateRun('Citation preference changed', { clearCaches: true });
@@ -2508,13 +2543,15 @@ function bindSettingsUi() {
         saveSettingsDebounced();
     });
 
-    bindNumberSetting('#hwr_claude_tokens', 'claudeResearchTokens');
+    if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+        bindNumberSetting('#hwr_claude_tokens', 'claudeResearchTokens');
+        bindNumberSetting('#hwr_gemini_tokens', 'geminiAnswerTokens');
+    }
     bindNumberSetting('#hwr_max_rounds', 'maxRounds');
     bindNumberSetting('#hwr_queries_per_round', 'maxQueriesPerRound');
     bindNumberSetting('#hwr_total_queries', 'maxTotalQueries');
     bindNumberSetting('#hwr_results_per_query', 'maxResultsPerQuery');
     bindNumberSetting('#hwr_planner_tokens', 'plannerMaxTokens');
-    bindNumberSetting('#hwr_gemini_tokens', 'geminiAnswerTokens');
     bindNumberSetting('#hwr_recent_messages', 'recentMessages');
     bindNumberSetting('#hwr_recent_context_chars', 'recentContextChars');
     bindNumberSetting('#hwr_query_chars', 'maxCharsPerQuery');
@@ -2523,27 +2560,39 @@ function bindSettingsUi() {
     bindNumberSetting('#hwr_reuse_seconds', 'reuseSeconds');
 
     $('#hwr_test_searxng').on('click', () => testStructuredSearchConnection('searxng'));
-    $('#hwr_test_anysearch').on('click', () => testStructuredSearchConnection('anysearch'));
     $('#hwr_test_serpapi').on('click', () => testStructuredSearchConnection('serpapi'));
-    $('#hwr_test_claude').on('click', testClaudeProfile);
-    $('#hwr_refresh_profiles').on('click', refreshClaudeProfiles);
+    if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+        $('#hwr_test_anysearch').on('click', () => testStructuredSearchConnection('anysearch'));
+        $('#hwr_test_claude').on('click', testClaudeProfile);
+        $('#hwr_refresh_profiles').on('click', refreshClaudeProfiles);
+        $('#hwr_refresh_gemini_profiles').on('click', refreshGeminiProfiles);
+    }
     $('#hwr_refresh_model').on('click', updateResolvedAdapterLabel);
     $('#hwr_clear_cache').on('click', () => {
         invalidateRun('Caches cleared', { clearCaches: true });
         updateStatus('idle', '内存缓存与临时注入已清理');
         toastr.success('已清理', 'Hidden Web Research');
     });
-    $('#hwr_refresh_gemini_profiles').on('click', refreshGeminiProfiles);
 
-    refreshClaudeProfiles();
-    refreshGeminiProfiles();
-    switchProviderConnectionUi('claude');
-    switchProviderConnectionUi('gemini');
-    updateSearchApiCredentialStatus('anysearch');
+    if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+        refreshClaudeProfiles();
+        refreshGeminiProfiles();
+        switchProviderConnectionUi('claude');
+        switchProviderConnectionUi('gemini');
+        updateSearchApiCredentialStatus('anysearch');
+    }
     updateSearchApiCredentialStatus('serpapi');
     updateResolvedAdapterLabel();
     switchBackendUi();
-    updateStatus('idle', settings.enabled ? '已启用，等待下一次生成' : '已关闭');
+    if (pausedBackendMigration) {
+        const previousBackend = pausedBackendMigration;
+        pausedBackendMigration = '';
+        invalidateRun('Paused server-dependent backend migrated', { clearCaches: true });
+        updateStatus('paused', '原联网模式已暂停；扩展已关闭，请重新选择并手动启用');
+        toastr.warning(`原联网模式 ${previousBackend} 需要额外服务端适配，已切回 SearXNG 并关闭扩展。`, 'Hidden Web Research');
+    } else {
+        updateStatus('idle', settings.enabled ? '已启用，等待下一次生成' : '已关闭');
+    }
 }
 
 globalThis.HiddenWebResearch_Intercept = hiddenWebResearchInterceptor;
@@ -2559,11 +2608,13 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
     invalidateRun('Chat changed', { clearCaches: true });
     updateStatus('idle', '聊天已切换，临时研究已清理');
 });
-eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, messageId => {
-    const context = SillyTavern.getContext();
-    const message = context.chat?.[Number(messageId)];
-    renderGeminiSearchEntryPoint(Number(messageId), message);
-});
+if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, messageId => {
+        const context = SillyTavern.getContext();
+        const message = context.chat?.[Number(messageId)];
+        renderGeminiSearchEntryPoint(Number(messageId), message);
+    });
+}
 
 jQuery(async () => {
     getSettings();
@@ -2571,8 +2622,10 @@ jQuery(async () => {
     const html = await renderExtensionTemplateAsync(EXTENSION_ID, 'settings');
     $('#extensions_settings2').append(html);
     bindSettingsUi();
-    const context = SillyTavern.getContext();
-    context.chat?.forEach((message, messageId) => {
-        renderGeminiSearchEntryPoint(messageId, message);
-    });
+    if (ENABLE_SERVER_DEPENDENT_FEATURES) {
+        const context = SillyTavern.getContext();
+        context.chat?.forEach((message, messageId) => {
+            renderGeminiSearchEntryPoint(messageId, message);
+        });
+    }
 });

@@ -6,7 +6,7 @@
         </div>
         <div class="inline-drawer-content">
             <div class="hwr_intro">
-                自动判断是否搜索；SearXNG、AnySearch、SerpAPI 与 Claude 在后台研究，Gemini 原生模式直接给出唯一最终回答。所有密钥都由 SillyTavern 服务端保管。不会生成工具楼层、附件或 Data Bank 文件。
+                自动判断是否搜索；当前公开版仅使用原版 SillyTavern 自带的 SearXNG 与 SerpAPI 路由。规划和补搜都不会生成工具楼层、附件或 Data Bank 文件。
             </div>
 
             <label class="checkbox_label" for="hwr_enabled">
@@ -17,14 +17,16 @@
             <label for="hwr_research_backend">联网模式</label>
             <select id="hwr_research_backend" class="text_pole">
                 <option value="searxng">本机 SearXNG（适用于所有模型，推荐）</option>
-                <option value="anysearch">AnySearch（anysearch.com，适用于所有模型）</option>
                 <option value="serpapi">SerpAPI Google（适用于所有模型）</option>
+                <!-- Paused: these modes require non-stock server routes or response passthrough.
+                <option value="anysearch">AnySearch（anysearch.com，适用于所有模型）</option>
                 <option value="claude_profile">Claude 原生搜索桥接（Profile 或 URL + Key）</option>
                 <option value="gemini_profile">Gemini 原生搜索直答（Profile 或 URL + Key）</option>
+                -->
             </select>
 
             <div id="hwr_adapter_block">
-                <label for="hwr_adapter">当前回答模型的搜索风格</label>
+                <label for="hwr_adapter">当前回答模型的查询规划策略</label>
                 <div class="hwr_inline">
                     <select id="hwr_adapter" class="text_pole">
                         <option value="auto">自动识别</option>
@@ -41,18 +43,18 @@
                 </div>
                 <div id="hwr_resolved_adapter" class="hwr_hint"></div>
                 <div class="hwr_notice">
-                    除 Claude/Gemini 启发策略外，1.4.0 只为当前旗舰 DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 建立专属档案：V4 Pro 合并同一主管机关下的相关分面，GLM 5.2 按主管层级与统计口径核验，Kimi K3 强制收敛其 Deep Research 式扩张。硬查询帽分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3。旧型号不会冒充这些新档案。
+                    这些是纯前端查询规划策略，不会调用任何模型厂商的官方搜索服务。DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 档案分别强调分面合并、层级核验与研究收敛；硬查询帽分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3。
                 </div>
             </div>
 
             <label for="hwr_search_policy">触发策略</label>
             <select id="hwr_search_policy" class="text_pole">
-                <option value="auto">本地零 token 判断（推荐）</option>
+                <option value="auto">模型自动判断（会调用隐藏规划器，推荐）</option>
                 <option value="always">每条消息都调用并至少搜索一次</option>
-                <option value="explicit">仅在用户明确要求联网时搜索</option>
+                <option value="explicit">仅在用户明确要求联网时搜索（其他消息本地跳过）</option>
             </select>
             <div class="hwr_hint">
-                Claude 与 Gemini 都先在本地判断；跳过的消息不会调用研究模型。明确要求“不联网”始终优先。
+                “模型自动判断”会先调用当前回答模型作为隐藏规划器，即使最后不搜索也会消耗规划 tokens；“仅明确要求联网”可在其他消息上本地零 token 跳过。明确要求“不联网”始终优先。
             </div>
 
             <div id="hwr_searxng_settings" class="hwr_backend_box">
@@ -70,6 +72,7 @@
                 </button>
             </div>
 
+            <!-- Paused server-dependent UI: AnySearch needs a dedicated server proxy.
             <div id="hwr_anysearch_settings" class="hwr_backend_box">
                 <h4>AnySearch（anysearch.com）</h4>
                 <div class="hwr_notice">
@@ -101,16 +104,19 @@
                     </button>
                 </div>
             </div>
+            -->
 
             <div id="hwr_serpapi_settings" class="hwr_backend_box">
                 <h4>SerpAPI Google Search</h4>
                 <div class="hwr_notice">
-                    复用 SillyTavern 内置的 SerpAPI 密钥槽与搜索路由。这里保存的新 Key 也会成为酒馆 WebSearch 等功能使用的当前 SerpAPI Key；每次只请求一页，不自动翻页放大费用。
+                    复用原版 SillyTavern 内置的 SerpAPI 密钥槽与基础搜索路由。这里保存的新 Key 也会成为酒馆 WebSearch 等功能使用的当前共享 Key；每次只请求一页。
                 </div>
+                <!-- Paused with the enhanced server adapter: stock SerpAPI ignores hl/gl.
                 <label for="hwr_serpapi_language">Google 语言 hl（可选）</label>
                 <input id="hwr_serpapi_language" class="text_pole" type="text" autocomplete="off" spellcheck="false" placeholder="例如 zh-cn、en 或 ja">
                 <label for="hwr_serpapi_country">Google 国家 gl（可选）</label>
                 <input id="hwr_serpapi_country" class="text_pole" type="text" autocomplete="off" spellcheck="false" maxlength="2" placeholder="例如 cn、us 或 jp">
+                -->
                 <label for="hwr_serpapi_key">SerpAPI Key</label>
                 <input id="hwr_serpapi_key" class="text_pole" type="password" autocomplete="new-password" spellcheck="false">
                 <div id="hwr_serpapi_status" class="hwr_credential_status" role="status" aria-live="polite"></div>
@@ -130,6 +136,7 @@
                 </div>
             </div>
 
+            <!-- Paused server-dependent UI: native Claude/Gemini modes are kept for future work.
             <div id="hwr_claude_profile_settings" class="hwr_backend_box">
                 <h4>Claude 原生搜索桥接</h4>
                 <div class="hwr_notice hwr_warning">
@@ -270,6 +277,7 @@
                     此模式不提供后台“测试搜索”：实际搜索结果必须展示给发起用户。可发送一条“请联网查……”消息进行验证。
                 </div>
             </div>
+            -->
 
             <label id="hwr_source_links_label" class="checkbox_label" for="hwr_include_source_links">
                 <input type="checkbox" id="hwr_include_source_links">
@@ -313,14 +321,14 @@
                     <input id="hwr_reuse_seconds" class="text_pole" type="number" min="0" max="3600" step="60">
                 </div>
                 <div class="hwr_hint">
-                    复用时间适用于 SearXNG、AnySearch、SerpAPI 与 Claude 隐藏研究；Gemini 原生最终回答始终重新请求，不缓存 Grounded Result。
+                    复用时间适用于当前启用的 SearXNG 与基础 SerpAPI 隐藏研究。
                 </div>
                 <div class="hwr_hint">
-                    “规划器 tokens”是通用下限；模型专属安全下限会自动覆盖较小值：DeepSeek V4 Pro 1024、GLM 5.2 1536、Kimi K3 2048。Kimi K3 始终思考，因此规划延迟通常更高。
+                    “规划器 tokens”是通用下限；模型专属提示策略会覆盖较小值：DeepSeek V4 Pro 1024、GLM 5.2 1536、Kimi K3 2048。私有 hwr_planner_profile 服务端标记当前暂停；普通请求参数是否生效由原版酒馆和上游决定。
                 </div>
                 <label class="checkbox_label" for="hwr_debug">
                     <input type="checkbox" id="hwr_debug">
-                    <span>调试日志（不会打印搜索正文）</span>
+                    <span>本扩展调试日志（不会打印搜索正文）</span>
                 </label>
             </details>
 
@@ -333,7 +341,7 @@
             </div>
 
             <div class="hwr_privacy">
-                隐私说明：SearXNG/AnySearch/SerpAPI/Claude 研究内容不写入聊天文件、附件、Data Bank、LocalStorage 或 IndexedDB，但会临时进入最终回答模型的请求上下文。AnySearch/SerpAPI 只收到规划出的搜索词及所选地区/语言参数；Claude 与 Gemini 的所选 Profile 或直连端点会收到最近对话。API Key 只存于当前 SillyTavern 用户的服务端 secrets，不写入扩展设置或聊天。Gemini 原生回答、引用与 Search Suggestions 会作为最终消息保存在聊天历史中。Google Search Grounding 另有 30 天处理与展示条款。
+                隐私说明：SearXNG/SerpAPI 研究内容不写入聊天文件、附件、Data Bank、LocalStorage 或 IndexedDB，但搜索词会发送给所选搜索服务，证据会临时进入最终回答模型的请求上下文。SerpAPI Key 使用当前 SillyTavern 用户的共享服务端 secrets，不写入扩展设置或聊天。本扩展自身的调试日志不打印搜索正文；原版酒馆服务端可能按其自身日志策略记录搜索查询。
             </div>
         </div>
     </div>
