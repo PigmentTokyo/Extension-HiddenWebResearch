@@ -6,7 +6,7 @@
         </div>
         <div class="inline-drawer-content">
             <div class="hwr_intro">
-                自动判断是否搜索；当前公开版仅使用原版 SillyTavern 自带的 SearXNG 与 SerpAPI 路由。规划和补搜都不会生成工具楼层、附件或 Data Bank 文件。
+                自动判断是否搜索；当前公开版仅使用原版 SillyTavern 自带的 SearXNG 与 SerpAPI 路由。搜索结果可作为本轮临时工具结果或隐藏研究包进入模型，两种方式都不会生成聊天楼层、附件或 Data Bank 文件。
             </div>
 
             <label class="checkbox_label" for="hwr_enabled">
@@ -26,7 +26,7 @@
             </select>
 
             <div id="hwr_adapter_block">
-                <label for="hwr_adapter">当前回答模型的查询规划策略</label>
+                <label for="hwr_adapter">当前回答模型的查询与回答策略</label>
                 <div class="hwr_inline">
                     <select id="hwr_adapter" class="text_pole">
                         <option value="auto">自动识别</option>
@@ -43,8 +43,26 @@
                 </div>
                 <div id="hwr_resolved_adapter" class="hwr_hint"></div>
                 <div class="hwr_notice">
-                    这些是纯前端查询规划策略，不会调用任何模型厂商的官方搜索服务。DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 档案分别强调分面合并、层级核验与研究收敛；硬查询帽分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3。
+                    这些是纯前端查询规划与最终回答策略，不会调用任何模型厂商的官方搜索服务。Claude 与 Gemini 分别采用顺序查证/克制引用、双分面 Grounding/逐段引用；DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 分别强调分面合并、层级核验与研究收敛。硬查询帽分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3。
                 </div>
+            </div>
+
+            <label for="hwr_result_transport">搜索结果注入方式</label>
+            <select id="hwr_result_transport" class="text_pole">
+                <option value="auto">自动：隐藏工具结果优先（推荐）</option>
+                <option value="prompt">固定使用隐藏研究包（最高兼容）</option>
+            </select>
+            <div id="hwr_resolved_transport" class="hwr_hint"></div>
+            <div class="hwr_notice">
+                自动模式会在酒馆确认当前连接支持函数调用时，把已完成的搜索重构为仅本轮请求可见的
+                <code>hwr_web_search</code> 工具调用与工具结果；Claude、Gemini 与 OpenAI 兼容来源会由酒馆转换为各自的普通客户端工具协议。
+                本轮只综合已有结果，不再开放其他函数工具，也会强制关闭厂商原生联网搜索，避免重复搜索和测试污染。
+                若函数调用关闭、消息协议不兼容或无法安全定位本轮研究内容，会保留隐藏研究包。
+                当前酒馆的 Gemini 3 转换器不会回传函数调用 ID，因此 Gemini 3 专用来源会保守使用隐藏研究包。
+            </div>
+            <div class="hwr_hint">
+                自动兼容回退发生在请求发送前；若某个中转错误宣称支持工具、但上游发送后才返回协议错误，前端扩展无法在同一轮透明重发。
+                遇到这种渠道时请选择“固定使用隐藏研究包”。
             </div>
 
             <label for="hwr_search_policy">触发策略</label>

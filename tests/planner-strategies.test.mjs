@@ -5,6 +5,8 @@ import {
     detectResearchStrategy,
     extractQueryFeatures,
     filterNovelQueries,
+    getResearchCitationInstruction,
+    getResearchResponseProfile,
     getResearchStrategyLabel,
     getResearchStrategyProfile,
     getStrategyQueryLimit,
@@ -46,6 +48,16 @@ assert.equal(getResearchStrategyProfile('kimi-k3').totalQueryLimit, 3);
 assert.equal(getResearchStrategyProfile('kimi-k3').plannerMinTokens, 2048);
 assert.equal(getResearchStrategyProfile('other').plannerMinTokens, 512);
 assert.equal(getResearchStrategyProfile('other').conservative, true);
+assert.equal(getResearchResponseProfile('anthropic').id, 'claude-inspired');
+assert.equal(getResearchResponseProfile('vertexai').id, 'gemini-inspired');
+assert.equal(getResearchResponseProfile('deepseek').id, 'deepseek-v4-pro');
+assert.match(getResearchResponseProfile('claude').instruction, /without imitating any private protocol/u);
+assert.match(getResearchResponseProfile('claude').instruction, /without.*Anthropic native search/u);
+assert.match(getResearchResponseProfile('gemini').instruction, /without.*Google native grounding/u);
+assert.match(getResearchCitationInstruction(true), /\[1\]\(EXACT_URL\)/u);
+assert.match(getResearchCitationInstruction(true), /Copy each supplied URL exactly/u);
+assert.match(getResearchCitationInstruction(false), /Do not output URLs, source IDs/u);
+
 assert.deepEqual(limitQueriesForStrategy(['a', 'b', 'c'], 'gemini', 1), ['a', 'b']);
 assert.deepEqual(limitQueriesForStrategy(['a', 'b', 'c'], 'gemini', 2), ['a']);
 assert.deepEqual(limitQueriesForStrategy(['a', 'b', 'c'], 'deepseek', 1), ['a', 'b']);

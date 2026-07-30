@@ -21,6 +21,46 @@ const STRATEGY_LABELS = Object.freeze({
     other: '其他 / 通用',
 });
 
+const RESPONSE_PROFILE_IDS = Object.freeze({
+    claude: 'claude-inspired',
+    gemini: 'gemini-inspired',
+    'deepseek-v4-pro': 'deepseek-v4-pro',
+    'glm-5.2': 'glm-5.2',
+    'kimi-k3': 'kimi-k3',
+    other: 'general',
+});
+
+const RESPONSE_STYLE_INSTRUCTIONS = Object.freeze({
+    claude: [
+        'Use a Claude-inspired research synthesis style, without imitating any private protocol or claiming Anthropic native search.',
+        'Lead with the direct answer, preserve the requested tone and format, and prefer authoritative or first-party sources.',
+        'For each materially current factual claim, normally cite the single strongest source; add another only when corroboration or a conflict matters, and explain material discrepancies.',
+        'Do not add a separate sources list unless the user requests one.',
+    ].join(' '),
+    gemini: [
+        'Use a Gemini-inspired grounded synthesis style, without imitating any private protocol or claiming Google native grounding.',
+        'Combine complementary evidence facets into one direct answer while preserving the requested tone and format.',
+        'Ground each sentence or short paragraph that contains materially current facts; group multiple citations after the claim when distinct sources jointly support it.',
+        'Do not emit groundingMetadata, Search Suggestions, or a separate sources list unless the user requests one.',
+    ].join(' '),
+    'deepseek-v4-pro': [
+        'Use a DeepSeek V4 Pro-oriented synthesis: merge complementary facets into a compact structured answer and clearly distinguish retrieved facts from your own inference.',
+        'Resolve contradictions explicitly, avoid repetitive caveats, and preserve the requested tone and format.',
+    ].join(' '),
+    'glm-5.2': [
+        'Use a GLM 5.2-oriented hierarchical synthesis: give the conclusion first, then organize verified facts and necessary explanation in descending importance.',
+        'Cross-check time-sensitive claims, flag conflicts precisely, and preserve the requested tone and format.',
+    ].join(' '),
+    'kimi-k3': [
+        'Use a Kimi K3-oriented research synthesis: give a concise conclusion followed by the minimum evidence trail needed to support it.',
+        'Converge overlapping sources, remove repetition, state unresolved gaps precisely, and preserve the requested tone and format.',
+    ].join(' '),
+    other: [
+        'Give a direct, well-grounded answer using the supplied current evidence.',
+        'Separate supported facts from inference, reconcile conflicts, and preserve the requested tone and format.',
+    ].join(' '),
+});
+
 const TARGET_MODEL_PATTERNS = Object.freeze([
     ['deepseek-v4-pro', /(?:^|[^a-z0-9])deepseek[\s._/-]+v4[\s._/-]*pro(?:$|[^a-z0-9.])/iu],
     ['glm-5.2', /(?:^|[^a-z0-9])glm[\s._/-]+5[\s._/-]+2(?:$|[^a-z0-9.])/iu],
@@ -269,6 +309,45 @@ export function getResearchStrategyLabel(value) {
  */
 export function getResearchStrategyProfile(value) {
     return RESEARCH_STRATEGY_PROFILES[normalizeStrategyName(value)];
+}
+
+/**
+ * Describes how the final answer should synthesize retrieved evidence.
+ * These are presentation profiles only; they never claim a vendor-native
+ * search tool was used.
+ *
+ * @param {unknown} value Strategy name or provider alias.
+ * @returns {{id: string, instruction: string}}
+ */
+export function getResearchResponseProfile(value) {
+    const strategy = normalizeStrategyName(value);
+    return {
+        id: RESPONSE_PROFILE_IDS[strategy],
+        instruction: RESPONSE_STYLE_INSTRUCTIONS[strategy],
+    };
+}
+
+/**
+ * Builds citation rules for the final answer.
+ *
+ * @param {boolean} includeSourceLinks Whether real source URLs are present.
+ * @returns {string}
+ */
+export function getResearchCitationInstruction(includeSourceLinks = true) {
+    if (!includeSourceLinks) {
+        return [
+            'Source links were intentionally omitted.',
+            'Do not output URLs, source IDs such as S1, numbered citation markers, or a sources list.',
+        ].join(' ');
+    }
+
+    return [
+        'Cite materially current web-supported claims using only the supplied <source> records.',
+        'A source may be cited only when its title, snippet, published date, or cited text supports the claim.',
+        'Render source S1 as [1](EXACT_URL), S2 as [2](EXACT_URL), and so on, placing compact citations immediately after the supported claim.',
+        'Copy each supplied URL exactly; never invent, repair, shorten, or alter a URL.',
+        'Never cite a query, an unresolved gap, or a source that does not support the statement, and do not expose internal S identifiers outside the compact numbered links.',
+    ].join(' ');
 }
 
 /**
