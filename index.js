@@ -1,4 +1,5 @@
 import {
+    CLIENT_VERSION,
     eventSource,
     event_types,
     extension_prompt_roles,
@@ -51,6 +52,7 @@ import {
     prepareAnchoredSearchQuery,
 } from './runtime-time.js';
 import {
+    buildCompletedClientToolMessages,
     buildClientWebSearchInvocations,
     normalizeResearchTransport,
     resolveResearchTransport,
@@ -73,11 +75,24 @@ import {
     isResearchBackendEnabled,
     resolveResearchBackendSelection,
 } from './feature-policy.js';
+import {
+    inspectSillyTavernCompatibility,
+    isCompatibleGenerationRequest,
+    MINIMUM_SUPPORTED_CLIENT_VERSION,
+    supportsGeminiToolChoiceNone,
+} from './st-compatibility.js';
 
 const EXTENSION_ID = 'third-party/Extension-HiddenWebResearch';
 const SETTINGS_KEY = 'hiddenWebResearch';
 const PROMPT_KEY = '___HiddenWebResearch___';
 const DISPLAY_NAME = 'P1G搜（颜料搜）';
+const CLIENT_COMPATIBILITY = inspectSillyTavernCompatibility({
+    clientVersion: CLIENT_VERSION,
+    eventSource,
+    eventTypes: event_types,
+    generateRaw,
+    getContext: globalThis.SillyTavern?.getContext,
+});
 
 const ADAPTERS = new Set([
     'auto',
@@ -1060,8 +1075,7 @@ function handleChatCompletionSettingsReady(request) {
     }
 
     const pending = activeToolTransport;
-    if (!pending || !Array.isArray(request.messages)) return;
-    if (!HANDLED_GENERATION_TYPES.has(String(request.type || ''))) return;
+    if (!pending || !isCompatibleGenerationRequest(request, HANDLED_GENERATION_TYPES)) return;
     if (String(SillyTavern.getContext().chatId ?? '') !== String(pending.chatId ?? '')) return;
 
     if (String(request.type || '') !== String(pending.type || '')) return;
@@ -1097,25 +1111,12 @@ function handleChatCompletionSettingsReady(request) {
         request.messages.splice(markerMessageIndex, 1);
     }
 
-    const toolCalls = pending.invocations.map(invocation => ({
-        id: invocation.id,
-        type: 'function',
-        function: {
-            name: invocation.name,
-            arguments: invocation.parameters,
-        },
-    }));
-    request.messages.push({
-        role: 'assistant',
-        content: '',
-        tool_calls: toolCalls,
-    });
-    request.messages.push(...pending.invocations.map(invocation => ({
-        role: 'tool',
-        tool_call_id: invocation.id,
-        content: invocation.result,
-    })));
     const requestSource = String(request.chat_completion_source || '').trim().toLowerCase();
+    const { toolCalls, messages: completedToolMessages } = buildCompletedClientToolMessages(
+        pending.invocations,
+        { includeReasoningContent: requestSource === 'deepseek' },
+    );
+    request.messages.push(...completedToolMessages);
     if (requestSource === 'deepseek') {
         // DeepSeek thinking models accept completed tool history but may reject
         // tool_choice. No callable schema is needed for final synthesis.
@@ -1269,12 +1270,15 @@ function updateResolvedAdapterLabel() {
 }
 
 function isClientToolTransportSupported() {
+    if (!CLIENT_COMPATIBILITY.requestRewrite) return false;
     const context = SillyTavern.getContext();
     if (context.mainApi !== 'openai') return false;
     const { source, model } = getCurrentModelInfo();
     const normalizedSource = source.trim().toLowerCase();
     if (normalizedSource === 'deepseek') return true;
-    const isGemini3 = ['makersuite', 'vertexai', 'google'].includes(normalizedSource)
+    const isGeminiSource = ['makersuite', 'vertexai', 'google'].includes(normalizedSource);
+    if (isGeminiSource && !supportsGeminiToolChoiceNone(CLIENT_VERSION)) return false;
+    const isGemini3 = isGeminiSource
         && /^gemini-3(?:[.-]|$)/iu.test(model.trim());
     if (isGemini3) return false;
     try {
@@ -1399,13 +1403,16 @@ async function planNextSearch({
     const profile = getResearchStrategyProfile(adapter);
     const responseLength = Math.max(profile.plannerMinTokens, settings.plannerMaxTokens);
     const requestTuningHook = request => applyPlannerRequestTuning(request, adapter);
+    const canTuneRequest = CLIENT_COMPATIBILITY.requestRewrite;
     const generateOptions = {
         prompt: prompts.userPrompt,
         systemPrompt: prompts.systemPrompt,
         responseLength,
         trimNames: false,
     };
-    eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+    if (canTuneRequest) {
+        eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+    }
     let raw;
     try {
         if (adapter === 'kimi-k3') {
@@ -1422,7 +1429,9 @@ async function planNextSearch({
             raw = await generateRaw(generateOptions);
         }
     } finally {
-        eventSource.removeListener(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+        if (canTuneRequest) {
+            eventSource.removeListener(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+        }
     }
     debugLog('Planner response received', { round, evaluationOnly, length: String(raw).length });
     return parsePlannerDecision(raw, evaluationOnly ? 1 : queryLimit);
@@ -2690,6 +2699,13 @@ async function runGeminiProfileAnswer({ chat, chatId, epoch, settings }) {
 }
 
 async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration, type) {
+    if (!CLIENT_COMPATIBILITY.supported) {
+        updateStatus(
+            'error',
+            `当前 SillyTavern 缺少兼容接口；最低支持 ${MINIMUM_SUPPORTED_CLIENT_VERSION}`,
+        );
+        return;
+    }
     clearPrompt();
     const settings = getSettings();
     if (!isResearchBackendEnabled(settings.researchBackend) || !RESEARCH_BACKENDS.has(settings.researchBackend)) {
@@ -3309,18 +3325,20 @@ function bindSettingsUi() {
 
 globalThis.HiddenWebResearch_Intercept = hiddenWebResearchInterceptor;
 
-eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, handleChatCompletionSettingsReady);
-eventSource.on(event_types.GENERATION_ENDED, () => {
-    invalidateRun('Generation ended');
-});
-eventSource.on(event_types.GENERATION_STOPPED, () => {
-    invalidateRun('Generation stopped');
-    updateStatus('idle', '生成已停止，临时研究已清理');
-});
-eventSource.on(event_types.CHAT_CHANGED, () => {
-    invalidateRun('Chat changed', { clearCaches: true });
-    updateStatus('idle', '聊天已切换，临时研究已清理');
-});
+if (CLIENT_COMPATIBILITY.supported) {
+    eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, handleChatCompletionSettingsReady);
+    eventSource.on(event_types.GENERATION_ENDED, () => {
+        invalidateRun('Generation ended');
+    });
+    eventSource.on(event_types.GENERATION_STOPPED, () => {
+        invalidateRun('Generation stopped');
+        updateStatus('idle', '生成已停止，临时研究已清理');
+    });
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        invalidateRun('Chat changed', { clearCaches: true });
+        updateStatus('idle', '聊天已切换，临时研究已清理');
+    });
+}
 if (ENABLE_SERVER_DEPENDENT_FEATURES) {
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, messageId => {
         const context = SillyTavern.getContext();
@@ -3330,6 +3348,17 @@ if (ENABLE_SERVER_DEPENDENT_FEATURES) {
 }
 
 jQuery(async () => {
+    if (!CLIENT_COMPATIBILITY.supported) {
+        const missing = CLIENT_COMPATIBILITY.missing.join(', ');
+        console.error(
+            `[${DISPLAY_NAME}] SillyTavern ${MINIMUM_SUPPORTED_CLIENT_VERSION}+ is required; missing: ${missing}`,
+        );
+        toastr.error(
+            `当前 SillyTavern 缺少必要接口，请升级到 ${MINIMUM_SUPPORTED_CLIENT_VERSION} 或更高版本。`,
+            DISPLAY_NAME,
+        );
+        return;
+    }
     getSettings();
     await readSecretState();
     const html = await renderExtensionTemplateAsync(EXTENSION_ID, 'settings');

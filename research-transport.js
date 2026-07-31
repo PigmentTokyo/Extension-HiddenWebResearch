@@ -65,6 +65,41 @@ export function resolveResearchTransport(preference, toolCallingSupported) {
 }
 
 /**
+ * Converts completed client-side searches into an OpenAI-compatible assistant
+ * tool call plus matching tool result messages. Provider adapters can then
+ * translate this neutral history to Claude or Gemini without exposing a chat
+ * floor.
+ */
+export function buildCompletedClientToolMessages(
+    invocations,
+    { includeReasoningContent = false } = {},
+) {
+    const normalizedInvocations = Array.isArray(invocations) ? invocations : [];
+    const toolCalls = normalizedInvocations.map(invocation => ({
+        id: invocation.id,
+        type: 'function',
+        function: {
+            name: invocation.name,
+            arguments: invocation.parameters,
+        },
+    }));
+    const assistant = {
+        role: 'assistant',
+        content: '',
+        tool_calls: toolCalls,
+    };
+    if (includeReasoningContent) {
+        assistant.reasoning_content = '';
+    }
+    const toolResults = normalizedInvocations.map(invocation => ({
+        role: 'tool',
+        tool_call_id: invocation.id,
+        content: invocation.result,
+    }));
+    return { toolCalls, messages: [assistant, ...toolResults] };
+}
+
+/**
  * Builds an ephemeral OpenAI-compatible tool exchange. SillyTavern converts the
  * same invocation records into Claude tool_use/tool_result and Gemini
  * functionCall/functionResponse when those providers are selected.

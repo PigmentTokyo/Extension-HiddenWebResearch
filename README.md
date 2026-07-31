@@ -6,6 +6,15 @@
 
 当前公开版以“可直接安装到原版 SillyTavern”为边界：只开放原版酒馆已经提供的 SearXNG 与基础 SerpAPI 路由，不要求修改核心文件，也不要求安装 server plugin。
 
+## SillyTavern 版本兼容
+
+- 最低支持 SillyTavern `1.13.3`；这是该版本首次同时具备扩展所需的对象式 `generateRaw()`、带生成类型的请求改写事件、多密钥接口和当前搜索路由协议。
+- `1.13.3–1.14.x` 保留 SearXNG、SerpAPI、隐藏规划、时间锚、模型策略、自定义提示词、缓存和无额外楼层等全部公开能力。由于这些版本不能把 `tool_choice: none` 可靠转换给 Gemini，Gemini 会自动走同一份中性隐藏研究包；Claude、DeepSeek 和其他安全来源仍可使用隐藏工具结果。
+- `1.15.0` 及以上保持当前双通道行为：安全时优先隐藏工具结果，其他情况自动回退隐藏研究包；Gemini 3 继续保守回退。
+- `1.18.x` 仍是主要实机回归环境。降低最低版本不会删除或关闭新版本上的任何现有功能。
+
+兼容判断采用实际接口和请求能力，并对旧版 Gemini 协议做安全降级；不是简单绕过 manifest。低于 `1.13.3` 的版本不会加载本扩展。
+
 ## 它解决什么问题
 
 - Claude/Gemini 中转、DeepSeek、GLM、Kimi 或其他没有原生联网能力的模型，可以在正式回答前进行隐藏搜索。
@@ -71,7 +80,7 @@
 
 自动模式会先依据当前 SillyTavern 连接能力选择通道。若请求还没发出时不能安全转换，就保留隐藏研究包；如果不可靠的中转在收到工具消息后才返回 4xx，浏览器扩展无法在同一轮透明重放，应该在设置中改为“固定使用隐藏研究包”。
 
-当前扩展对 Gemini 3 专用来源保守使用隐藏研究包：SillyTavern 1.18.0 的转换器不会把 OpenAI 兼容调用 ID 写入 Gemini `functionCall/functionResponse`，无法在不改后端的前提下可靠模拟多查询匹配。Claude 与 DeepSeek 专用来源不受这个限制。
+当前扩展对 Gemini 3 专用来源始终保守使用隐藏研究包，因为当前酒馆转换协议无法在多次同名搜索时可靠保留调用 ID。SillyTavern 1.13.3–1.14.x 的 Gemini 后端还不能可靠执行 `tool_choice: none`，因此这些版本的全部 Gemini 来源都会自动回退隐藏研究包；1.15.0 及以上的非 Gemini 3 来源可恢复工具通道。Claude 与 DeepSeek 专用来源不受这个限制。
 
 ## 触发策略与 token
 
@@ -124,7 +133,14 @@
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.8.3`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.8.4`。最低支持 SillyTavern `1.13.3`；`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.8.4`：
+
+- 将最低 SillyTavern 版本从 1.18.0 下调到 1.13.3，并增加运行时接口检查，避免只改清单造成“能安装但规划或注入失效”；
+- 在 1.13.3–1.14.x 上保留全部搜索、规划与无楼层能力，同时对不能可靠禁止二次工具调用的 Gemini 自动使用隐藏研究包；1.15.0 及以上保持原有双通道；
+- DeepSeek 的已完成工具调用消息显式补充空 `reasoning_content`，兼容 1.13.3–1.14.x 的旧后端，并与新版自动补全逻辑兼容；
+- 新增最低版本、请求生命周期、版本能力和 1.13.3 请求形状回归测试；设置 schema 仍为 9，现有配置无需迁移。
 
 `1.8.3`：
 
@@ -194,6 +210,7 @@ node tests/planner-prompts.test.mjs
 node tests/query-safety.test.mjs
 node tests/search-providers.test.mjs
 node tests/feature-policy.test.mjs
+node tests/st-compatibility.test.mjs
 ```
 
 原生 Claude/Gemini 解析器测试暂时继续保留，作为以后恢复实验能力时的回归基线；测试存在不代表公开版已经开放对应功能。

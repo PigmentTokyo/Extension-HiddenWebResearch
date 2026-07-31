@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+    buildCompletedClientToolMessages,
     buildClientWebSearchInvocations,
     normalizeResearchTransport,
     resolveResearchTransport,
@@ -47,6 +48,38 @@ assert.equal(JSON.parse(invocations[0].result).provider, 'SearXNG');
 assert.equal(JSON.parse(invocations[0].result).retrieved_at_utc, '2026-07-30T15:00:00.000Z');
 assert.equal(JSON.parse(invocations[0].result).results[0].url, 'https://weather.example/tokyo');
 assert.ok(invocations.every(item => item.error === false && item.signature === null));
+
+const standardExchange = buildCompletedClientToolMessages(invocations);
+assert.equal(standardExchange.toolCalls.length, 2);
+assert.deepEqual(standardExchange.messages[0], {
+    role: 'assistant',
+    content: '',
+    tool_calls: standardExchange.toolCalls,
+});
+assert.deepEqual(standardExchange.toolCalls[0], {
+    id: invocations[0].id,
+    type: 'function',
+    function: {
+        name: 'hwr_web_search',
+        arguments: invocations[0].parameters,
+    },
+});
+assert.deepEqual(standardExchange.messages.slice(1), invocations.map(invocation => ({
+    role: 'tool',
+    tool_call_id: invocation.id,
+    content: invocation.result,
+})));
+assert.equal('reasoning_content' in standardExchange.messages[0], false);
+
+const deepSeekExchange = buildCompletedClientToolMessages(invocations, {
+    includeReasoningContent: true,
+});
+assert.equal(deepSeekExchange.messages[0].reasoning_content, '');
+assert.deepEqual(deepSeekExchange.messages.slice(1), standardExchange.messages.slice(1));
+assert.deepEqual(buildCompletedClientToolMessages(null), {
+    toolCalls: [],
+    messages: [{ role: 'assistant', content: '', tool_calls: [] }],
+});
 
 const noLinks = buildClientWebSearchInvocations({
     queries: ['query'],

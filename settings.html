@@ -6,7 +6,7 @@
         </div>
         <div class="inline-drawer-content">
             <div class="hwr_intro">
-                自动判断是否搜索；当前公开版仅使用原版 SillyTavern 自带的 SearXNG 与 SerpAPI 路由。搜索结果可作为本轮临时工具结果或隐藏研究包进入模型，两种方式都不会生成聊天楼层、附件或 Data Bank 文件。
+                兼容 SillyTavern 1.13.3 及以上版本。自动判断是否搜索；当前公开版仅使用原版 SillyTavern 自带的 SearXNG 与 SerpAPI 路由。搜索结果可作为本轮临时工具结果或隐藏研究包进入模型，两种方式都不会生成聊天楼层、附件或 Data Bank 文件。
             </div>
 
             <label class="checkbox_label" for="hwr_enabled">
@@ -91,7 +91,8 @@
                 <code>hwr_web_search</code> 工具调用与工具结果；Claude、Gemini 与 OpenAI 兼容来源会由酒馆转换为各自的普通客户端工具协议。
                 本轮只综合已有结果，不再开放其他函数工具，也会强制关闭厂商原生联网搜索，避免重复搜索和测试污染。
                 若函数调用关闭、消息协议不兼容或无法安全定位本轮研究内容，会保留隐藏研究包。
-                当前酒馆的 Gemini 3 转换器不会回传函数调用 ID，因此 Gemini 3 专用来源会保守使用隐藏研究包。
+                SillyTavern 1.13.3–1.14.x 尚不能对 Gemini 最终综合请求可靠强制“禁止再次调用工具”，因此这些版本的 Gemini 会自动使用隐藏研究包；1.15.0 及以上仅对 Gemini 3 保守回退。
+                Claude、DeepSeek 与其他兼容来源仍可在支持函数调用时使用隐藏工具结果。
             </div>
             <div class="hwr_hint">
                 自动兼容回退发生在请求发送前；若某个中转错误宣称支持工具、但上游发送后才返回协议错误，前端扩展无法在同一轮透明重发。

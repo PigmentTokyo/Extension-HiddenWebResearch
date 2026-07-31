@@ -60,12 +60,14 @@ assert.deepEqual(resolveResearchBackendSelection('unknown', true), {
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const plannerPromptsSource = await readFile(new URL('../planner-prompts.js', import.meta.url), 'utf8');
 const querySafetySource = await readFile(new URL('../query-safety.js', import.meta.url), 'utf8');
+const researchTransportSource = await readFile(new URL('../research-transport.js', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.8.3');
+assert.equal(manifest.version, '1.8.4');
+assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
 assert.match(visibleSettingsHtml, /<b>P1G搜（颜料搜）<\/b>/u);
@@ -173,10 +175,14 @@ assert.match(indexSource, /prepareAnchoredSearchQuery\(candidateQuery/u);
 assert.match(indexSource, /const conversationChat = Array\.isArray\(context\.chat\)/u);
 assert.match(indexSource, /getLatestUserMessage\(conversationChat\)/u);
 assert.match(indexSource, /buildClientWebSearchInvocations/u);
+assert.match(indexSource, /buildCompletedClientToolMessages/u);
 assert.match(indexSource, /<<<HWR_CLIENT_TOOL_RESULTS_/u);
 assert.match(indexSource, /name:\s*'hwr_web_search'/u);
-assert.match(indexSource, /role:\s*'assistant',\s*\n\s*content:\s*'',\s*\n\s*tool_calls:/u);
-assert.match(indexSource, /role:\s*'tool',\s*\n\s*tool_call_id:/u);
+assert.match(researchTransportSource, /role:\s*'assistant',\s*\n\s*content:\s*'',\s*\n\s*tool_calls:/u);
+assert.match(researchTransportSource, /role:\s*'tool',\s*\n\s*tool_call_id:/u);
+assert.match(researchTransportSource, /assistant\.reasoning_content = ''/u);
+assert.match(indexSource, /supportsGeminiToolChoiceNone\(CLIENT_VERSION\)/u);
+assert.match(indexSource, /CLIENT_COMPATIBILITY\.requestRewrite/u);
 assert.match(indexSource, /request\.tool_choice = 'none'/u);
 assert.match(indexSource, /requestSource === 'deepseek'/u);
 assert.match(indexSource, /delete request\.tools/u);
@@ -186,11 +192,12 @@ assert.match(indexSource, /\['makersuite', 'vertexai', 'google'\]/u);
 assert.match(indexSource, /if \(isGemini3\) return false/u);
 assert.match(indexSource, /if \(normalizedSource === 'deepseek'\) return true/u);
 assert.match(indexSource, /activePromptInjection && hasInjectedResearchMarker\(request\)/u);
+assert.match(indexSource, /isCompatibleGenerationRequest\(request, HANDLED_GENERATION_TYPES\)/u);
 assert.match(indexSource, /String\(request\.type \|\| ''\) !== String\(pending\.type \|\| ''\)/u);
 assert.match(indexSource, /request\.messages\.findLast/u);
 assert.match(indexSource, /message\?\.name !== 'example_user'/u);
 assert.match(indexSource, /typeof item\.content === 'string'/u);
-assert.match(visibleSettingsHtml, /Gemini 3 转换器不会回传函数调用 ID/u);
+assert.match(visibleSettingsHtml, /1\.13\.3–1\.14\.x 尚不能对 Gemini/u);
 assert.match(indexSource, /request\.enable_web_search = false/u);
 assert.match(
     indexSource,
@@ -249,6 +256,7 @@ assert.match(visibleSettingsHtml, /<option value="gemini">Gemini /u);
 assert.match(visibleSettingsHtml, /id="hwr_result_transport"/u);
 assert.match(visibleSettingsHtml, /隐藏工具结果优先/u);
 assert.match(visibleSettingsHtml, /固定使用隐藏研究包/u);
+assert.match(visibleSettingsHtml, /兼容 SillyTavern 1\.13\.3 及以上版本/u);
 assert.match(visibleSettingsHtml, /<option value="serpapi">/u);
 for (const id of [
     'hwr_strategy_custom_enabled',
