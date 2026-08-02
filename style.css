@@ -350,10 +350,16 @@
 }
 
 .hwr_summary_title {
+    flex: 0 0 auto;
     min-width: 0;
+    max-width: 62%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .hwr_summary_meta {
+    flex: 1 1 auto;
     min-width: 0;
     margin-left: auto;
     overflow: hidden;
@@ -434,6 +440,6 @@
 
     .hwr_summary_meta {
         max-width: 52%;
-        white-space: normal;
+        white-space: nowrap;
     }
 }
