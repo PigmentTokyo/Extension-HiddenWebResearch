@@ -86,6 +86,7 @@
                 <select id="hwr_planner_connection_mode" class="text_pole">
                     <option value="current">当前回答模型（原有方式）</option>
                     <option value="profile">指定 Connection Manager Profile（副 API）</option>
+                    <option value="direct">自行保存 OpenAI 兼容 URL + Key（副 API）</option>
                 </select>
                 <div id="hwr_planner_profile_panel" class="hwr_connection_panel">
                     <label for="hwr_planner_profile">副 API Profile（仅列出 Chat Completion）</label>
@@ -96,23 +97,79 @@
                         </button>
                     </div>
                     <div id="hwr_planner_profile_hint" class="hwr_hint"></div>
-                    <label class="checkbox_label" for="hwr_planner_fallback_current">
-                        <input type="checkbox" id="hwr_planner_fallback_current">
-                        <span>副 API 失败时，本轮后续规划回退当前回答模型（推荐）</span>
-                    </label>
                     <button id="hwr_test_planner_profile" class="menu_button hwr_button" type="button">
                         <i class="fa-solid fa-flask"></i>
                         <span>测试副规划器（会调用一次 API）</span>
                     </button>
                 </div>
+                <div id="hwr_planner_direct_panel" class="hwr_connection_panel hwr_direct_panel">
+                    <label for="hwr_planner_direct_connection">已保存的副 API 配置</label>
+                    <div class="hwr_inline">
+                        <select id="hwr_planner_direct_connection" class="text_pole"></select>
+                        <button id="hwr_new_planner_direct" class="menu_button" type="button" title="新建副 API 配置">
+                            <i class="fa-solid fa-plus"></i>
+                            <span>新建</span>
+                        </button>
+                    </div>
+                    <label for="hwr_planner_direct_name">配置名称</label>
+                    <input id="hwr_planner_direct_name" class="text_pole" type="text" autocomplete="off" spellcheck="false" placeholder="例如：便宜规划器">
+                    <label for="hwr_planner_direct_url">OpenAI 兼容 Base URL</label>
+                    <input id="hwr_planner_direct_url" class="text_pole" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/v1">
+                    <div class="hwr_hint">
+                        只支持 OpenAI-compatible Chat Completions。填写 API 根路径；若粘贴了末尾 <code>/chat/completions</code>，保存时会自动去除。
+                    </div>
+                    <label for="hwr_planner_direct_model">精确模型 ID</label>
+                    <div class="hwr_model_row">
+                        <input id="hwr_planner_direct_model" class="text_pole" type="text" list="hwr_planner_direct_models" autocomplete="off" spellcheck="false" placeholder="例如 deepseek-chat">
+                        <button id="hwr_fetch_planner_direct_models" class="menu_button" type="button" aria-describedby="hwr_planner_direct_model_list_status" aria-busy="false">
+                            <i class="fa-solid fa-list"></i>
+                            <span>拉取模型列表</span>
+                        </button>
+                    </div>
+                    <datalist id="hwr_planner_direct_models"></datalist>
+                    <div id="hwr_planner_direct_model_list_status" class="hwr_model_list_status" data-state="idle" role="status" aria-live="polite">
+                        尚未拉取模型列表；也可以始终手工填写精确模型 ID。
+                    </div>
+                    <label for="hwr_planner_direct_key">API Key</label>
+                    <input id="hwr_planner_direct_key" class="text_pole" type="password" autocomplete="new-password" spellcheck="false" placeholder="输入后保存；已保存的 Key 不会回显">
+                    <div id="hwr_planner_direct_status" class="hwr_credential_status" role="status" aria-live="polite"></div>
+                    <div class="hwr_button_row">
+                        <button id="hwr_save_planner_direct" class="menu_button" type="button">
+                            <i class="fa-solid fa-floppy-disk"></i>
+                            <span>保存配置</span>
+                        </button>
+                        <button id="hwr_delete_planner_direct" class="menu_button" type="button">
+                            <i class="fa-solid fa-trash"></i>
+                            <span>删除配置</span>
+                        </button>
+                        <button id="hwr_test_planner_direct" class="menu_button" type="button">
+                            <i class="fa-solid fa-flask"></i>
+                            <span>测试副规划器（会调用一次 API）</span>
+                        </button>
+                    </div>
+                    <div class="hwr_notice">
+                        Key 只写入当前 SillyTavern 用户的服务端 secrets，不写入扩展设置、聊天记录或浏览器存储，也不会回显。扩展设置只保存配置名称、URL、模型和对应的 secret ID。
+                        切换已保存配置只会改变下一次规划请求引用的 secret ID，不会轮换酒馆的活动 Custom Key。
+                    </div>
+                    <div class="hwr_notice hwr_warning">
+                        原版酒馆的 secrets 写入接口会把刚保存的新 Key 标为活动；若原先已有活动 Custom Key，插件只会在未检测到其他页面或扩展介入时恢复它。若原先整个 Custom Key 槽为空，新 Key 将持续成为酒馆全局活动 Custom Key：插件不会改变主模型 URL 或模型，但以后未指定 <code>secret-id</code> 的 Custom 请求可能使用这把规划 Key。首次空槽保存会单独二次确认。保存动作期间不要在另一标签页同时生成、保存或轮换 Custom Key；需要完全避开共享密钥槽副作用时，请使用合适来源的 Connection Manager Profile。保存和删除事务会短时锁定当前标签页的发送、继续、重生成、滑动与停止入口（纯元数据修改也一样）。写 Key 的窗口内，本页走酒馆 <code>CHAT_COMPLETION_SETTINGS_READY</code> 管线且没有显式 <code>secret-id</code> 的 Custom 请求（包括后台 <code>generateRaw()</code>）会被指定到一个随机不存在的 ID，因此请求会失败而不会误用瞬时规划 Key；状态不明时该保护与发送锁会保持到刷新。其他标签页仍无法锁定；同源扩展若绕过事件管线直接 <code>fetch</code>，或预先捕获并自行调用更底层的原函数，也属于同一信任边界，无法由本扩展可靠封锁。请只安装可信扩展；若活动 Custom Key 无法安全确认，请先检查酒馆密钥管理器再刷新页面。
+                    </div>
+                    <div class="hwr_notice hwr_warning">
+                        独立保存和切换多把直连 Key 需要 SillyTavern 1.18.0 或更高版本；1.13.3–1.17.x 请改用上方 Connection Manager Profile。只有 Anthropic <code>/messages</code> 或 Gemini <code>generateContent</code> 协议、且没有 OpenAI 兼容接口的渠道，也请使用 Connection Profile。
+                    </div>
+                </div>
+                <label class="checkbox_label" for="hwr_planner_fallback_current">
+                    <input type="checkbox" id="hwr_planner_fallback_current">
+                    <span>副 API 失败时，本轮后续规划回退当前回答模型（推荐）</span>
+                </label>
                 <div id="hwr_resolved_planner_connection" class="hwr_hint"></div>
                 <div class="hwr_notice">
-                    副 API 只执行隐藏的 SEARCH / DONE 判断、查询词规划、补搜和资料充分性评估；最终正文始终使用当前回答模型。它会收到本轮用户请求、设置范围内的最近聊天以及已取得的搜索摘要。每次规划仍是独立模型调用，只是费用和负载转移到所选 Profile。
-                    扩展只保存 Profile ID，URL、Proxy 与 Key 继续由 SillyTavern Connection Manager 管理，并且不会切换酒馆当前连接。插件不向副 API 提交搜索工具，同时显式关闭 SillyTavern 的原生联网开关；如果模型名称（例如 <code>:online</code>）、模型本身或中转网关强制联网，前端插件无法禁止，可能另行产生搜索费用。
-                    只应选择你信任的 Profile 和 HTTPS 端点。副规划 Profile 路径不会读取或复制 Connection Manager 中已保存的 Key，但无法替你审计中转服务器；Connection Manager、Proxy Preset 与同源第三方扩展属于同一前端信任域。
+                    副 API 只执行隐藏的 SEARCH / DONE 判断、查询词规划、补搜和资料充分性评估；真正的网页搜索仍由已配置的 SearXNG 或 SerpAPI 完成，最终正文始终使用当前回答模型。副 API 会收到本轮用户请求、设置范围内的最近聊天以及已取得的搜索摘要。每次规划仍是独立模型调用，只是费用和负载转移到所选副 API。
+                    Connection Profile 模式只保存 Profile ID，直连模式只保存非敏感连接元数据和服务端 secret ID；两种方式都不会切换当前回答的来源、Profile、URL 或模型。直连首次写入空 Custom 密钥槽时会改变全局活动 Custom credential，详见上方警告。插件不向副 API 提交搜索工具，同时显式关闭 SillyTavern 的原生联网开关；如果模型名称（例如 <code>:online</code>）、模型本身或中转网关强制联网，前端插件无法禁止，可能另行产生搜索费用。
+                    只应使用可信的 Profile 和 HTTPS 端点。扩展无法替你审计中转服务器；Connection Manager、Proxy Preset 与同源第三方扩展属于同一前端信任域。
                 </div>
                 <div class="hwr_warning">
-                    SillyTavern 1.13.3–1.17.x 可以独立选择 Profile 的来源、URL 和模型，但请求使用该 SillyTavern Chat Completion 来源当前激活的密钥槽；从 1.18.0 起才会按 Profile 精确选择独立 <code>secret-id</code>。旧版需要不同 Key 时，请让副规划器使用另一来源，或把规划 Key 设为对应来源的当前激活 Key。Reverse Proxy Preset 的密码是例外，由酒馆自身的 Proxy Preset 设置机制管理。
+                    SillyTavern 1.13.3–1.17.x 可以独立选择 Connection Profile 的来源、URL 和模型，但请求使用该 SillyTavern Chat Completion 来源当前激活的密钥槽；从 1.18.0 起才会按 Profile 精确选择独立 <code>secret-id</code>。旧版需要不同 Key 时，请让副规划器使用另一来源，或把规划 Key 设为对应来源的当前激活 Key。Reverse Proxy Preset 的密码是例外，由酒馆自身的 Proxy Preset 设置机制管理。
                 </div>
             </div>
 
@@ -469,7 +526,7 @@
             </div>
 
             <div class="hwr_privacy">
-                隐私说明：SearXNG/SerpAPI 研究内容不写入聊天文件、附件、Data Bank、LocalStorage 或 IndexedDB，但搜索词会发送给所选搜索服务，证据会临时进入最终回答模型的请求上下文。SerpAPI Key 使用当前 SillyTavern 用户的共享服务端 secrets，不写入扩展设置或聊天。本扩展自身的调试日志不打印搜索正文；原版酒馆服务端可能按其自身日志策略记录搜索查询。
+                隐私说明：SearXNG/SerpAPI 研究内容不写入聊天文件、附件、Data Bank、LocalStorage 或 IndexedDB，但搜索词会发送给所选搜索服务，证据会临时进入最终回答模型的请求上下文。若选择 Connection Profile 或自行保存的直连副 API，本轮用户请求、设置范围内的最近聊天以及搜索摘要也会发送给所选副规划服务。直连规划 Key 与 SerpAPI Key 使用当前 SillyTavern 用户的服务端 secrets，不写入扩展设置或聊天；直连配置只在扩展设置中保存名称、URL、模型和 secret ID。本扩展自身的调试日志不打印搜索正文；原版酒馆服务端可能按其自身日志策略记录搜索查询和副规划请求。
             </div>
         </div>
     </div>

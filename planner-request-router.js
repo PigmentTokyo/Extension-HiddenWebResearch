@@ -1,6 +1,7 @@
 export const PLANNER_CONNECTION_MODES = Object.freeze({
     CURRENT: 'current',
     PROFILE: 'profile',
+    DIRECT: 'direct',
 });
 
 export const PLANNER_REQUEST_TIMEOUT_REASON = 'Request timed out';
@@ -16,8 +17,8 @@ export function shouldFallbackPlannerRequest(signal, fallbackToCurrent) {
 
 export function resolvePlannerRequestMode(mode, profileFailed = false) {
     const normalizedMode = normalizePlannerConnectionMode(mode);
-    return normalizedMode === PLANNER_CONNECTION_MODES.PROFILE && !profileFailed
-        ? PLANNER_CONNECTION_MODES.PROFILE
+    return normalizedMode !== PLANNER_CONNECTION_MODES.CURRENT && !profileFailed
+        ? normalizedMode
         : PLANNER_CONNECTION_MODES.CURRENT;
 }
 
@@ -60,9 +61,9 @@ export async function fallbackPlannerToCurrent({
 
 export function normalizePlannerConnectionMode(value) {
     const normalized = String(value || '').trim().toLowerCase();
-    return normalized === PLANNER_CONNECTION_MODES.PROFILE
-        ? PLANNER_CONNECTION_MODES.PROFILE
-        : PLANNER_CONNECTION_MODES.CURRENT;
+    if (normalized === PLANNER_CONNECTION_MODES.PROFILE) return PLANNER_CONNECTION_MODES.PROFILE;
+    if (normalized === PLANNER_CONNECTION_MODES.DIRECT) return PLANNER_CONNECTION_MODES.DIRECT;
+    return PLANNER_CONNECTION_MODES.CURRENT;
 }
 
 export function listPlannerProfiles(service) {
@@ -133,7 +134,7 @@ function extractPlannerText(response) {
 
 /**
  * Routes one hidden planning request without changing SillyTavern's selected
- * connection. Credentials remain owned by Connection Manager.
+ * connection. The supplied service owns endpoint selection and credentials.
  */
 export async function requestHiddenPlanner({
     mode,
@@ -163,12 +164,12 @@ export async function requestHiddenPlanner({
     }
 
     try {
-        if (!profileId) throw new Error('No planner Connection Profile selected');
+        if (!profileId) throw new Error('No secondary planner connection selected');
         if (!service || typeof service.sendRequest !== 'function') {
-            throw new Error('Connection Manager request service is unavailable');
+            throw new Error('Secondary planner request service is unavailable');
         }
         const profile = listPlannerProfiles(service).find(item => item.id === profileId);
-        if (!profile) throw new Error('Selected planner Connection Profile is unavailable');
+        if (!profile) throw new Error('Selected secondary planner connection is unavailable');
 
         const response = await service.sendRequest(
             profileId,
@@ -185,10 +186,10 @@ export async function requestHiddenPlanner({
         );
         throwIfAborted(signal);
         const text = extractPlannerText(response);
-        if (!text) throw new Error('Planner Connection Profile returned an empty response');
+        if (!text) throw new Error('Secondary planner returned an empty response');
         return {
             text,
-            source: PLANNER_CONNECTION_MODES.PROFILE,
+            source: normalizedMode,
             fallbackUsed: false,
         };
     } catch (error) {

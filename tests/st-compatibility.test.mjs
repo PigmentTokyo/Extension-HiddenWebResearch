@@ -8,11 +8,14 @@ import {
     isCompatibleGenerationRequest,
     MINIMUM_SUPPORTED_CLIENT_VERSION,
     parseSillyTavernClientVersion,
+    PLANNER_DIRECT_SECRET_ID_MINIMUM_VERSION,
     supportsGeminiToolChoiceNone,
+    supportsPlannerDirectSecretId,
 } from '../st-compatibility.js';
 
 assert.equal(MINIMUM_SUPPORTED_CLIENT_VERSION, '1.13.3');
 assert.equal(GEMINI_TOOL_CHOICE_NONE_MINIMUM_VERSION, '1.15.0');
+assert.equal(PLANNER_DIRECT_SECRET_ID_MINIMUM_VERSION, '1.18.0');
 assert.deepEqual(
     parseSillyTavernClientVersion('SillyTavern:1.13.3:Cohee#1207'),
     { major: 1, minor: 13, patch: 3, normalized: '1.13.3' },
@@ -32,6 +35,9 @@ assert.equal(supportsGeminiToolChoiceNone('SillyTavern:1.14.9:Cohee#1207'), fals
 assert.equal(supportsGeminiToolChoiceNone('SillyTavern:1.15.0:Cohee#1207'), true);
 assert.equal(supportsGeminiToolChoiceNone('SillyTavern:1.18.0:Cohee#1207'), true);
 assert.equal(supportsGeminiToolChoiceNone('SillyTavern:UNKNOWN:Cohee#1207'), false);
+assert.equal(supportsPlannerDirectSecretId('SillyTavern:1.17.9:Cohee#1207'), false);
+assert.equal(supportsPlannerDirectSecretId('SillyTavern:1.18.0:Cohee#1207'), true);
+assert.equal(supportsPlannerDirectSecretId('SillyTavern:UNKNOWN:Cohee#1207'), false);
 
 const eventTypes = {
     CHAT_COMPLETION_SETTINGS_READY: 'chat_completion_settings_ready',
@@ -115,7 +121,7 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 assert.equal(manifest.minimum_client_version, MINIMUM_SUPPORTED_CLIENT_VERSION);
-assert.equal(manifest.version, '1.9.0');
+assert.equal(manifest.version, '1.10.0');
 assert.match(indexSource, /CLIENT_VERSION/u);
 assert.match(indexSource, /supportsGeminiToolChoiceNone\(CLIENT_VERSION\)/u);
 assert.match(indexSource, /buildCompletedClientToolMessages/u);

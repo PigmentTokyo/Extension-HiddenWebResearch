@@ -66,7 +66,7 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.9.0');
+assert.equal(manifest.version, '1.10.0');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -77,7 +77,7 @@ assert.match(indexSource, /const SETTINGS_KEY = 'hiddenWebResearch'/u);
 assert.match(indexSource, /const PROMPT_KEY = '___HiddenWebResearch___'/u);
 assert.match(readme, /^# P1G搜（颜料搜） for SillyTavern$/mu);
 assert.match(readme, /https:\/\/github\.com\/PigmentTokyo\/Extension-HiddenWebResearch/u);
-assert.match(indexSource, /schemaVersion:\s*10/u);
+assert.match(indexSource, /schemaVersion:\s*11/u);
 assert.match(indexSource, /strategyCustomPromptEnabled:\s*false/u);
 assert.match(indexSource, /strategyCustomPrompt:\s*''/u);
 assert.match(indexSource, /triggerCustomPromptEnabled:\s*false/u);
@@ -299,6 +299,6 @@ for (const id of [
 
 assert.match(visibleSettingsHtml, /id="hwr_searxng_settings"/u);
 assert.match(visibleSettingsHtml, /id="hwr_serpapi_settings"/u);
-assert.doesNotMatch(visibleSettingsHtml, /URL \+ Key/u);
+assert.match(visibleSettingsHtml, /<option value="direct">自行保存 OpenAI 兼容 URL \+ Key（副 API）<\/option>/u);
 
 console.log('Stock-only feature policy: all assertions passed');

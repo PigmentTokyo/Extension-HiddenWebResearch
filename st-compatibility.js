@@ -1,5 +1,6 @@
 export const MINIMUM_SUPPORTED_CLIENT_VERSION = '1.13.3';
 export const GEMINI_TOOL_CHOICE_NONE_MINIMUM_VERSION = '1.15.0';
+export const PLANNER_DIRECT_SECRET_ID_MINIMUM_VERSION = '1.18.0';
 
 const REQUIRED_EVENT_NAMES = Object.freeze([
     'CHAT_COMPLETION_SETTINGS_READY',
@@ -39,6 +40,16 @@ export function isClientVersionAtLeast(clientVersion, minimumVersion) {
  */
 export function supportsGeminiToolChoiceNone(clientVersion) {
     return isClientVersionAtLeast(clientVersion, GEMINI_TOOL_CHOICE_NONE_MINIMUM_VERSION);
+}
+
+/**
+ * Connection Profile and custom Chat Completion requests only forward their
+ * exact secret ID from SillyTavern 1.18.0 onward. Older clients fall back to
+ * the provider's globally active key and therefore cannot safely isolate a
+ * plugin-managed direct planner credential.
+ */
+export function supportsPlannerDirectSecretId(clientVersion) {
+    return isClientVersionAtLeast(clientVersion, PLANNER_DIRECT_SECRET_ID_MINIMUM_VERSION);
 }
 
 function hasEvent(eventTypes, name) {

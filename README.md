@@ -12,6 +12,7 @@
 - `1.13.3–1.14.x` 保留 SearXNG、SerpAPI、隐藏规划、时间锚、模型策略、自定义提示词、缓存和无额外楼层等全部公开能力。由于这些版本不能把 `tool_choice: none` 可靠转换给 Gemini，Gemini 会自动走同一份中性隐藏研究包；Claude、DeepSeek 和其他安全来源仍可使用隐藏工具结果。
 - `1.15.0` 及以上保持当前双通道行为：安全时优先隐藏工具结果，其他情况自动回退隐藏研究包；Gemini 3 继续保守回退。
 - 指定 Connection Profile 作为副规划 API 的请求能力从 `1.13.3` 起即可使用；但 `1.13.3–1.17.x` 使用对应 SillyTavern Chat Completion 来源当前激活的密钥槽，`1.18.0` 起才能按 Profile 精确绑定独立 `secret-id`。
+- 插件内命名直连副规划器要求 `1.18.0+`：只有这些版本才能把每个 OpenAI-compatible URL / 模型精确绑定到各自的服务端 `secret-id`。旧版继续使用当前回答模型或 Connection Profile，不会退化为全局轮换 Key 或浏览器明文保存。
 - `1.18.x` 仍是主要实机回归环境。降低最低版本不会删除或关闭新版本上的任何现有功能。
 
 兼容判断采用实际接口和请求能力，并对旧版 Gemini 协议做安全降级；不是简单绕过 manifest。低于 `1.13.3` 的版本不会加载本扩展。
@@ -20,7 +21,8 @@
 
 - Claude/Gemini 中转、DeepSeek、GLM、Kimi 或其他没有原生联网能力的模型，可以在正式回答前进行隐藏搜索。
 - 可把查询规划、补搜与充分性判断交给当前回答模型，也可指定另一个 Connection Manager Profile 作为便宜的副 API；最终正文始终由当前主模型写作。
-- 当前模型模式继续通过 `generateRaw()` 规划；副 API 模式直接按 Profile 发请求，不切换酒馆当前连接，也不要求修改后端或安装 server plugin。
+- 在 SillyTavern 1.18.0 及以上，也可直接填写 OpenAI-compatible Base URL、模型和 Key，并把最多 20 组副规划 API 命名保存、随时切换；网页搜索仍由 SearXNG 或 SerpAPI 执行。
+- 当前模型模式继续通过 `generateRaw()` 规划；副 API 模式不会切换当前回答的来源、Profile、URL 或模型，也不要求修改后端或安装 server plugin。直连模式首次写入空 Custom 密钥槽时会改变全局活动 Custom credential，这是原版 secrets 的共享槽例外，详见下方警告。
 - 搜索证据优先在本轮请求发出前转换为客户端工具调用与工具结果；连接不支持安全工具消息时，自动保留为临时 depth-0 `IN_CHAT` 隐藏研究包。
 - 搜索结果标准化为标题、URL、摘要和可选日期；最终回答可使用紧跟事实的真实 Markdown 编号链接。
 - regenerate 和 swipe 可在短时间内复用内存研究结果。
@@ -31,10 +33,11 @@
 | --- | --- | --- |
 | 本机 SearXNG | 支持 | 一台酒馆服务器能够访问的 SearXNG 实例 |
 | SerpAPI Google Search | 支持 | 当前用户已保存的共享 SerpAPI Key |
+| OpenAI-compatible URL + Key 副规划器 | 1.18.0+ 支持 | 只负责隐藏规划；搜索仍使用上面的 SearXNG / SerpAPI |
 | AnySearch | 暂停 | 需要额外服务端代理，因此公开版不显示 |
 | Claude 原生搜索桥接 | 暂停 | 当前高级协议依赖额外响应适配，因此公开版不显示 |
 | Gemini 原生 Grounding | 暂停 | 原版酒馆不透传完整 Grounding 元数据，因此公开版不显示 |
-| Claude/Gemini URL + Key、模型列表 | 暂停 | 需要专用服务端凭据与模型列表路由 |
+| Claude/Gemini 原生搜索 URL + Key、模型列表 | 暂停 | 需要专用服务端凭据与原生协议适配；不同于 OpenAI-compatible 副规划器 |
 
 暂停项目的实现代码暂时保留在硬编码关闭的内部开关后，旧设置不会继续调用它们。以后如果配套服务端方案成熟，再单独恢复。
 
@@ -79,7 +82,10 @@
 
 - **当前回答模型（默认）**：保持旧版行为，由当前主连接执行隐藏规划，再由同一主模型生成最终正文。
 - **指定 Connection Manager Profile（副 API）**：所选 Profile 只负责 `SEARCH / DONE` 判断、查询词生成、补搜与最后的证据充分性评估；正文仍走当前主连接。
+- **插件内 OpenAI-compatible 直连（1.18.0+）**：直接选择一组已命名保存的 Base URL、模型与服务端 Key，只把隐藏规划请求交给它；最终正文仍走当前主连接。
 - **策略下拉框**：决定规划提示词和最终回答契约。它不会自动切换到对应厂商；例如主模型 DeepSeek、策略选 Claude、副规划 Profile 选 Gemini 时，Gemini 会执行 Claude 启发的规划规则，而最终正文仍由 DeepSeek 写。
+
+### Connection Manager Profile
 
 副 API 模式复用原版 SillyTavern 的 `ConnectionManagerRequestService.sendRequest()`：
 
@@ -91,7 +97,22 @@
 - 副规划器会收到最新用户请求、设置范围内的最近真实聊天消息、补搜阶段已经取得的网页摘要，以及启用的自定义规划补充词。只选择自己信任的 Profile 和 HTTPS 端点，不要把不愿发送给该副 API 的内容放进规划上下文。
 - Connection Manager、Proxy Preset 与所有同源第三方扩展属于同一前端信任域。副规划 Profile 路径不会读取或复制 Connection Manager 中已保存的 Key，但无法替用户审计 Custom API 或中转服务器。
 
-默认启用“副 API 失败时回退当前回答模型”：一次 Profile 缺失、超时、上游错误、空回复或格式错误后，本轮后续规划直接走当前模型，不会每轮先失败一次再双重计费。用户停止或切换聊天造成的 abort 会立即结束插件等待且不会再启动回退；但已经送达上游、或渠道忽略取消信号的请求仍可能继续执行和计费。关闭该选项后，坏 Profile 仍会在本轮熔断而不再重复收费；明确必须搜索的请求可使用本地安全查询兜底，模糊请求则继续普通生成。
+### 插件内 OpenAI-compatible 直连（仅 1.18.0+）
+
+不想先建立 Connection Profile 时，可以直接在扩展里填写 OpenAI-compatible Base URL、精确模型 ID 和 Key。该路径只使用原版 SillyTavern 已有的 Custom Chat Completion 与 secrets 接口，不增加后端路由，不修改核心文件，也不需要 server plugin。
+
+- 最多保存 20 组命名配置；选择另一项只会改变下一次隐藏规划请求所引用的 URL、模型和精确 `secret-id`，不会修改当前回答模型的 URL 或模型。Custom 活动密钥槽的首次写入副作用见下条。
+- Key 写入当前 SillyTavern 用户的服务端 `SECRET_KEYS.CUSTOM` secrets。扩展设置只保存 `{ id, name, apiUrl, model, secretId }` 元数据，密码框保存后清空，明文 Key 不会回显，也不会写入扩展设置、缓存或聊天。
+- 原版 `/api/secrets/write` 会把新 Key 设为活动 Custom Key。若保存前已有活动项，扩展只有在活动项仍是刚写入的新 Key 时才恢复旧项，避免覆盖另一标签页或扩展的后续轮换；若保存前整个 Custom 槽为空，原版酒馆要求非空槽恰有一个活动项，因此新规划 Key 会持续成为全局活动 Custom Key。插件不会改变主模型 URL 或模型，但以后任何没有精确 `secret-id` 的 Custom 请求可能把它发送到自己的 Custom URL。首次空槽保存会二次确认；不接受该共享槽副作用时请取消并改用合适来源的 Connection Manager Profile，或先建立希望保持活动的 Custom Key。保存期间不要在其他标签页并行生成或改 Custom Key；选择已有配置本身不会轮换 Key。
+- 配置与 Key 操作都采用服务端回读确认；事务开始前会先取消尚未执行的酒馆延迟保存、立即保存当前完整设置并回读，无法确认落盘时不会写 Key 或删除旧 Key。旧 Key 只有在确认由本插件创建、处于非活动状态、且服务端落盘状态与当前页面都确认未被其他本插件配置或 Connection Manager Profile 引用时才会自动清理，其余情况保留并提示到酒馆密钥管理器手工检查。
+- 保存或删除直连副 API 配置时，插件会从事务开始到设置回读与 Key 清理结束，短时锁定当前标签页的发送、继续、重生成、滑动和停止入口；纯 URL / 模型 / 名称修改也使用同一把锁，避免隐藏研究读取到半完成配置。写入 Key 的窗口内，当前页走原版 `CHAT_COMPLETION_SETTINGS_READY` 管线、且没有显式 `secret-id` 的 Custom 请求（包括后台 `generateRaw()`）还会被临时指定到每事务唯一且不存在的 secret ID：并发请求会因无有效凭据而失败，不会回退到瞬时活动的规划 Key。若写入、恢复或回滚后无法证明全局活动 Custom Key 安全，该保护和当前标签页发送锁都会保持到刷新。其他标签页无法由前端扩展锁定；同源扩展若绕过酒馆事件管线直接 `fetch`，或预先捕获并自行调用更底层的原函数，也处于同一信任边界，前端扩展无法可靠封锁。因此仍不要并行生成或轮换 Custom Key，并只安装可信扩展。
+- Base URL 可填写形如 `https://example.com/v1` 的地址；如果粘贴末尾 `/chat/completions`，扩展会归一化为 Base URL。修改已保存配置的 URL 时必须重新输入 Key，避免把旧凭据意外发送到新站点。
+- 只支持 OpenAI Chat Completions 兼容协议。只提供 Anthropic Messages 或 Gemini `generateContent` 原生接口的地址不能直接使用；请在 Connection Manager 建立对应来源的 Chat Completion Profile。
+- 直连模型仍只执行 `SEARCH / DONE`、查询生成、补搜和证据充分性判断。真正的网页查询继续由已选 SearXNG / SerpAPI 完成，最终正文始终由当前回答模型生成。
+- 请求显式关闭酒馆原生联网且不提交搜索工具，但无法阻止名称含 `:online`、模型自身或中转网关强制搜索；这可能产生额外搜索费用。
+- 请求由 SillyTavern 服务器发往所填地址。非 HTTPS 或不可信端点能够看到 Key、规划提示、设置范围内的最近聊天和搜索摘要；除可信本机回环地址外应坚持 HTTPS。允许普通用户填写任意地址还可能形成服务端请求（SSRF）风险，多人或公网酒馆必须限制配置权限并审计目标端点。
+
+默认启用“副 API 失败时回退当前回答模型”：一次 Profile / 直连配置缺失、超时、上游错误、空回复或格式错误后，本轮后续规划直接走当前模型，不会每轮先失败一次再双重计费。用户停止或切换聊天造成的 abort 会立即结束插件等待且不会再启动回退；但已经送达上游、或渠道忽略取消信号的请求仍可能继续执行和计费。关闭该选项后，坏配置仍会在本轮熔断而不再重复收费；明确必须搜索的请求可使用本地安全查询兜底，模糊请求则继续普通生成。
 
 ### 旧版 Key 选择限制
 
@@ -101,6 +122,8 @@
 | 1.18.0+ | 支持 | 支持按 Profile 的 `secret-id` 精确选择 |
 
 因此旧版如果主模型与副规划器使用同一个 SillyTavern Chat Completion 来源密钥槽、又必须使用两把不同 Key，不能承诺真正隔离。可让副规划器使用另一来源，或先把规划 Key 设为该来源的当前激活 Key。扩展不会通过临时轮换 Key 或切换 Profile 绕过此限制，因为那会改变全局状态并产生并发竞态。
+
+插件内 URL + Key 直连采用更严格的边界：`1.13.3–1.17.x` 不开放该模式，只能选择当前回答模型或现有 Connection Profile。扩展不会为兼容旧版而轮换全局 `SECRET_KEYS.CUSTOM` 活跃 Key，也不会把 raw Key 保存到 extension settings、LocalStorage 或其他客户端存储；升级到 `1.18.0+` 后才能安全使用多配置独立 `secret-id`。
 
 Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不是服务商 `secret-id`；该密码遵循 SillyTavern 自身的 Proxy Preset 设置与存储机制。
 
@@ -121,6 +144,8 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 - **每条消息都调用并至少搜索一次**：仍先调用所选规划器来提炼查询，但它不能否决首次搜索；本条明确禁止联网和纯本地日期/时间是例外。
 - **仅在用户明确要求联网时搜索**：先由本地规则识别“联网查、网页搜索、给来源、查证报道”等请求。未命中时零模型 token 跳过；命中后再调用所选规划器组织查询，并保证至少搜索一次。
 
+无论选择当前模型、Connection Profile 还是插件内直连，每一次首轮判断、补搜规划或最终充分性评估都是一次独立的规划模型 API 调用，会分别产生 token / 费用；最终正文又是当前主模型的一次调用。SearXNG / SerpAPI 查询是另一类搜索请求。选择 `:online` 或会强制联网的副模型时，即使插件关闭了原生搜索字段，上游仍可能自行搜索并额外收费。
+
 换句话说，“查询与回答策略”决定**怎样判断模糊情况、怎样查、怎样写**；“触发策略”决定**这一轮是否进入研究流程，以及首次搜索能否被跳过**。当前用户明确要求“不联网”始终拥有最高优先级。规划器不会向用户直接回答；所有历史文本和搜索摘要都作为不可信数据封装，网页中的指令不会被执行。
 ### 自定义补充提示词
 
@@ -134,7 +159,7 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 ## 无额外楼层的实现
 
 1. 正式生成开始前，`generate_interceptor` 读取最近对话。
-2. 当前模型通过隐藏 `generateRaw()`，或指定 Connection Profile 通过独立请求规划查询。
+2. 当前模型通过隐藏 `generateRaw()`、指定 Connection Profile，或 1.18.0+ 的插件内 OpenAI-compatible 直连配置执行规划查询。
 3. 扩展调用 SearXNG 或 SerpAPI，并根据证据缺口决定是否补搜。
 4. 扩展先把带唯一标记的研究包作为临时 system-role `IN_CHAT` 提示加入本轮 token 预算。
 5. 在 `CHAT_COMPLETION_SETTINGS_READY` 阶段，自动模式会把标记块改写为请求内的客户端工具调用与工具结果；不能安全改写时原样保留中性研究包。
@@ -148,7 +173,7 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 
 - 联网模式：本机 SearXNG
 - 查询规划策略：自动识别
-- 规划器来源：默认当前回答模型；想把规划费用转移到便宜模型时选择独立 Connection Profile
+- 规划器来源：默认当前回答模型；想转移规划费用时可选独立 Connection Profile，SillyTavern 1.18.0+ 也可选插件内命名保存的 OpenAI-compatible URL + Key
 - 搜索结果注入：隐藏工具结果优先
 - 触发策略：需要节省规划 token 时选择“仅明确要求联网”；希望模型自动决定时选择“模型自动判断”
 - 最多规划轮数：3
@@ -167,7 +192,19 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.9.0`。最低支持 SillyTavern `1.13.3`；`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.10.0`。最低支持 SillyTavern `1.13.3`；`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.10.0`：
+
+- 新增插件内 OpenAI-compatible 副规划 API：填写 Base URL、模型与 Key，可命名保存并切换最多 20 组配置，主回答连接不变；
+- Key 使用原版 SillyTavern `SECRET_KEYS.CUSTOM` 服务端 secrets 保存，扩展设置只保留配置元数据与 `secretId`，不会保存或回显明文；
+- 保存、轮换、设置落盘与删除增加服务端回读校验；状态不明、活动中、非插件所有或仍被 Connection Manager 引用的 Key 都会保留，避免刷新后配置断链；
+- 原版写 Key 会短暂激活新值，插件阻止当前页生成期间保存并在未检测到并发轮换时恢复原活动项；选择已有配置本身不轮换 Key；
+- 精确隔离的多 Key 直连模式仅在 SillyTavern 1.18.0+ 开放；1.13.3–1.17.x 继续使用当前模型或 Connection Profile，不轮换全局 Key，也不降级为客户端明文存储；
+- 直连规划不要求修改后端或安装 server plugin；网页搜索仍使用 SearXNG / SerpAPI，最终正文仍由当前回答模型生成；
+- URL 变更必须重新输入 Key；限制为 OpenAI Chat Completions 兼容端点，并补充 HTTPS、第三方信任与 SSRF 风险提示；
+- 规划请求继续按每轮独立 API 调用计费，并保留失败熔断、单次回退、取消丢弃晚到结果及 `:online` 强制联网边界；
+- 新增直连配置规范化、20 项上限、就绪检查、无明文缓存指纹与 1.18.0 secret-id 能力边界测试。
 
 `1.9.0`：
 
@@ -238,6 +275,10 @@ https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 
 SerpAPI 密码框只用于写入当前 SillyTavern 用户的共享服务端 secrets；成功后不会把明文 Key 写进扩展设置或聊天。删除当前共享 Key 会同时影响 WebSearch 等其他使用者，因此界面会二次确认。
 
+插件内直连副规划器的 Key 写入当前用户的原版 `SECRET_KEYS.CUSTOM` 服务端 secrets；配置列表只保存名称、Base URL、模型和不透明 `secretId`。保存成功后密码框清空，扩展不会读取、回显、记录或导出 raw Key。切换配置只更换请求所引用的 `secretId`；SillyTavern 1.18.0 以下不会开放该能力，也不会通过轮换全局 Custom Key 模拟隔离。
+
+保存新 Key 时，原版接口不可避免地会先把它标为活动项。插件会在安全条件下立即恢复此前活动项，但这一写入窗口并非服务端原子事务；请不要跨标签页并行生成或轮换 Custom Key。设置保存、Key 写入、轮换与删除均会回读验证；状态不明、Key 仍活动、来源不属于本插件或可能被 Connection Manager 引用时一律保留，不做猜测性删除。
+
 本扩展自己的调试日志不打印搜索正文。原版 SillyTavern 的服务端搜索路由可能按照其自身实现记录查询或上游响应；在多人或公网环境使用前，请根据你的隐私要求审查并配置酒馆日志。
 
 ## 开发检查
@@ -250,6 +291,8 @@ node tests/native-search-metrics.test.mjs
 node tests/planner-strategies.test.mjs
 node tests/planner-prompts.test.mjs
 node tests/planner-request-router.test.mjs
+node tests/planner-direct-profiles.test.mjs
+node tests/planner-direct-transactions.test.mjs
 node tests/query-safety.test.mjs
 node tests/search-providers.test.mjs
 node tests/feature-policy.test.mjs

@@ -4,17 +4,23 @@ import {
     event_types,
     extension_prompt_roles,
     extension_prompt_types,
+    activateSendButtons,
+    deactivateSendButtons,
     generateRaw,
     getRequestHeaders,
+    is_send_press,
     saveSettings,
     saveSettingsDebounced,
     setExtensionPrompt,
+    setSendButtonState,
 } from '../../../../script.js';
 import { DOMPurify } from '../../../../lib.js';
 import {
     extension_settings,
     renderExtensionTemplateAsync,
 } from '../../../extensions.js';
+import { is_group_generating } from '../../../group-chats.js';
+import { cancelDebounce } from '../../../utils.js';
 import {
     deleteSecret,
     readSecretState,
@@ -38,6 +44,27 @@ import {
     CUSTOM_PROMPT_MAX_CHARS,
     normalizeCustomPrompt,
 } from './planner-prompts.js';
+import {
+    getPlannerDirectProfileFingerprint,
+    getReadyPlannerDirectProfile,
+    isPlannerDirectProfileReady,
+    normalizePlannerDirectApiUrl,
+    normalizePlannerDirectProfile,
+    normalizePlannerDirectProfiles,
+    PLANNER_DIRECT_PROFILE_LIMIT,
+} from './planner-direct-profiles.js';
+import {
+    arePlannerDirectCustomSecretStatesEqual,
+    arePlannerDirectSettingsSnapshotsEqual,
+    findNewPlannerDirectSecret,
+    getPlannerDirectSecretCleanupDecision,
+    PLANNER_DIRECT_SECRET_CLEANUP_REASON,
+    PLANNER_DIRECT_SECRET_RECORDS_STATUS,
+    projectPlannerDirectConnectionProfileSecretReferences,
+    projectPlannerDirectCustomSecretState,
+    projectPlannerDirectSettingsSnapshot,
+    shouldRestorePreviousPlannerDirectSecret,
+} from './planner-direct-transactions.js';
 import {
     fallbackPlannerToCurrent,
     listPlannerProfiles,
@@ -90,6 +117,7 @@ import {
     isCompatibleGenerationRequest,
     MINIMUM_SUPPORTED_CLIENT_VERSION,
     supportsGeminiToolChoiceNone,
+    supportsPlannerDirectSecretId,
 } from './st-compatibility.js';
 
 const EXTENSION_ID = 'third-party/Extension-HiddenWebResearch';
@@ -120,7 +148,7 @@ const CONNECTION_MODES = new Set(['profile', 'direct']);
 const HANDLED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe']);
 
 const defaultSettings = {
-    schemaVersion: 10,
+    schemaVersion: 11,
     enabled: false,
     adapter: 'auto',
     searchPolicy: 'auto',
@@ -130,6 +158,8 @@ const defaultSettings = {
     triggerCustomPrompt: '',
     plannerConnectionMode: PLANNER_CONNECTION_MODES.CURRENT,
     plannerProfileId: '',
+    plannerDirectProfileId: '',
+    plannerDirectProfiles: [],
     plannerFallbackToCurrent: true,
     researchBackend: 'searxng',
     searxngUrl: '',
@@ -175,6 +205,8 @@ let activeAbortController = null;
 let activeToolTransport = null;
 let activePromptInjection = false;
 let pausedBackendMigration = '';
+let plannerDirectCredentialRequestGuard = null;
+const plannerDirectCredentialSealedRequests = new WeakMap();
 
 /**
  * @typedef {Object} SearchItem
@@ -232,6 +264,27 @@ function getSettings() {
     return settings;
 }
 
+function plannerDirectProfilesMatchPersisted(rawProfiles, normalizedProfiles) {
+    if (!Array.isArray(rawProfiles) || rawProfiles.length !== normalizedProfiles.length) return false;
+    const allowedKeys = ['apiUrl', 'id', 'model', 'name', 'secretId'];
+    return rawProfiles.every((rawProfile, index) => {
+        if (!rawProfile || typeof rawProfile !== 'object' || Array.isArray(rawProfile)) return false;
+        const keys = Object.keys(rawProfile).sort();
+        if (keys.length !== allowedKeys.length || keys.some((key, keyIndex) => key !== allowedKeys[keyIndex])) {
+            return false;
+        }
+        const normalizedProfile = normalizedProfiles[index];
+        return allowedKeys.every(key => rawProfile[key] === normalizedProfile[key]);
+    });
+}
+
+function setNormalizedPlannerDirectProfiles(settings, setValue) {
+    const normalizedProfiles = normalizePlannerDirectProfiles(settings.plannerDirectProfiles);
+    if (!plannerDirectProfilesMatchPersisted(settings.plannerDirectProfiles, normalizedProfiles)) {
+        setValue('plannerDirectProfiles', normalizedProfiles.map(profile => ({ ...profile })));
+    }
+}
+
 function normalizeSettings(settings) {
     let changed = false;
     const setValue = (key, value) => {
@@ -251,6 +304,8 @@ function normalizeSettings(settings) {
     if (!SEARCH_POLICIES.has(settings.searchPolicy)) setValue('searchPolicy', defaultSettings.searchPolicy);
     setValue('plannerConnectionMode', normalizePlannerConnectionMode(settings.plannerConnectionMode));
     setValue('plannerProfileId', String(settings.plannerProfileId || ''));
+    setValue('plannerDirectProfileId', String(settings.plannerDirectProfileId || '').trim().slice(0, 128));
+    setNormalizedPlannerDirectProfiles(settings, setValue);
     setValue('plannerFallbackToCurrent', Boolean(settings.plannerFallbackToCurrent));
     const strategyCustomPrompt = normalizeCustomPrompt(settings.strategyCustomPrompt);
     const triggerCustomPrompt = normalizeCustomPrompt(settings.triggerCustomPrompt);
@@ -305,6 +360,10 @@ function normalizeSettings(settings) {
 const directSaveLocks = new Set();
 const directModelListLocks = new Set();
 const searchKeyLocks = new Set();
+let plannerDirectSaveLocked = false;
+let plannerDirectModelListLocked = false;
+let plannerDirectTestLocked = false;
+let plannerDirectTestAbortController = null;
 const ANYSEARCH_SECRET_KEY = SECRET_KEYS.ANYSEARCH || 'api_key_anysearch';
 
 function getSearchApiDefinition(provider) {
@@ -1084,6 +1143,37 @@ function appendClientSearchToolDefinition(request) {
     request.tool_choice = 'none';
 }
 
+function isPlannerDirectImplicitCustomCredentialRequest(request) {
+    return Boolean(
+        request
+        && typeof request === 'object'
+        && String(request.chat_completion_source || '').trim().toLowerCase() === 'custom'
+        && !String(request.secret_id || '').trim(),
+    );
+}
+
+function capturePlannerDirectCredentialWindowRequest(request) {
+    const guard = plannerDirectCredentialRequestGuard;
+    if (!guard || !isPlannerDirectImplicitCustomCredentialRequest(request)) return;
+    plannerDirectCredentialSealedRequests.set(request, guard.sentinelSecretId);
+    request.secret_id = guard.sentinelSecretId;
+}
+
+function enforcePlannerDirectCredentialWindowRequest(request) {
+    if (!request || typeof request !== 'object') return;
+    const capturedSentinel = plannerDirectCredentialSealedRequests.get(request) || '';
+    plannerDirectCredentialSealedRequests.delete(request);
+    if (String(request.chat_completion_source || '').trim().toLowerCase() !== 'custom') return;
+    // Preserve every explicit exact credential chosen by the caller or another
+    // request hook. Only stock Custom requests that would fall back to the
+    // mutable global active Key are sealed.
+    if (String(request.secret_id || '').trim()) return;
+    const sentinelSecretId = capturedSentinel
+        || plannerDirectCredentialRequestGuard?.sentinelSecretId
+        || '';
+    if (sentinelSecretId) request.secret_id = sentinelSecretId;
+}
+
 function handleChatCompletionSettingsReady(request) {
     if (!request || typeof request !== 'object') return;
     if (activePromptInjection && hasInjectedResearchMarker(request)) {
@@ -1157,6 +1247,10 @@ function invalidateRun(reason, { clearCaches = false } = {}) {
     if (activeAbortController) {
         activeAbortController.abort(reason);
         activeAbortController = null;
+    }
+    if (plannerDirectTestAbortController) {
+        plannerDirectTestAbortController.abort(reason);
+        plannerDirectTestAbortController = null;
     }
     if (clearCaches) {
         researchCache.clear();
@@ -1370,6 +1464,60 @@ function applyPlannerRequestTuning(request, adapter) {
     }
 }
 
+function getPlannerDirectSecretRecords() {
+    const records = secret_state?.[SECRET_KEYS.CUSTOM];
+    return Array.isArray(records) ? records : [];
+}
+
+function getActivePlannerCustomSecret() {
+    return getPlannerDirectSecretRecords().find(record => record?.active) || null;
+}
+
+function plannerDirectSecretExists(secretId) {
+    const normalizedId = String(secretId || '').trim();
+    return Boolean(normalizedId && getPlannerDirectSecretRecords().some(record => record?.id === normalizedId));
+}
+
+function getSelectedPlannerDirectProfile(settings = getSettings()) {
+    const profile = getReadyPlannerDirectProfile(
+        settings.plannerDirectProfiles,
+        settings.plannerDirectProfileId,
+    );
+    return profile && plannerDirectSecretExists(profile.secretId) ? profile : null;
+}
+
+function getPlannerDirectService(settings = getSettings()) {
+    if (!supportsPlannerDirectSecretId(CLIENT_VERSION)) return null;
+    const context = SillyTavern.getContext();
+    if (!context.ChatCompletionService?.processRequest) return null;
+    const getSupportedProfiles = () => normalizePlannerDirectProfiles(settings.plannerDirectProfiles)
+        .filter(profile => isPlannerDirectProfileReady(profile) && plannerDirectSecretExists(profile.secretId));
+    return {
+        getSupportedProfiles,
+        sendRequest: async (profileId, messages, maxTokens, custom = {}, overridePayload = {}) => {
+            const profile = getSupportedProfiles().find(item => item.id === profileId);
+            if (!profile) throw new Error('Selected direct planner profile is unavailable');
+            const requestData = {
+                ...overridePayload,
+                stream: false,
+                messages,
+                max_tokens: maxTokens,
+                model: profile.model,
+                chat_completion_source: 'custom',
+                custom_url: profile.apiUrl,
+                secret_id: profile.secretId,
+                enable_web_search: false,
+                n: 1,
+            };
+            disableVendorNativeSearch(requestData);
+            delete requestData.tools;
+            delete requestData.tool_choice;
+            return context.ChatCompletionService.processRequest(requestData, {
+                presetName: undefined,
+            }, true, custom?.signal ?? null);
+        },
+    };
+}
 function getPlannerProfileService() {
     const context = SillyTavern.getContext();
     const service = context.ConnectionManagerRequestService;
@@ -1382,7 +1530,19 @@ function getPlannerProfileService() {
     };
 }
 
-function getPlannerProfileFingerprint(settings) {
+function getPlannerConnectionFingerprint(settings) {
+    if (settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.DIRECT) {
+        const profile = normalizePlannerDirectProfiles(settings.plannerDirectProfiles)
+            .find(item => item.id === settings.plannerDirectProfileId);
+        if (profile) {
+            return getPlannerDirectProfileFingerprint(profile);
+        }
+        return {
+            mode: PLANNER_CONNECTION_MODES.DIRECT,
+            profileIdHash: hashString(settings.plannerDirectProfileId || ''),
+            unavailable: true,
+        };
+    }
     if (settings.plannerConnectionMode !== PLANNER_CONNECTION_MODES.PROFILE) {
         return { mode: PLANNER_CONNECTION_MODES.CURRENT };
     }
@@ -1495,15 +1655,23 @@ async function planNextSearch({
         { role: 'system', content: prompts.systemPrompt },
         { role: 'user', content: prompts.userPrompt },
     ];
-    const profileRequested = settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.PROFILE;
-    if (profileRequested && plannerRuntime?.profileFailed && !settings.plannerFallbackToCurrent) {
-        throw new Error('Planner Connection Profile is unavailable for the rest of this research run');
+    const configuredMode = settings.plannerConnectionMode;
+    // Direct profiles depend on per-secret routing added in ST 1.18. Preserve
+    // their metadata on older clients, but never attempt a request with the
+    // globally active Custom key or make the fallback checkbox relevant.
+    const effectiveMode = configuredMode === PLANNER_CONNECTION_MODES.DIRECT
+        && !isPlannerDirectConnectionSupported()
+        ? PLANNER_CONNECTION_MODES.CURRENT
+        : configuredMode;
+    const externalRequested = effectiveMode !== PLANNER_CONNECTION_MODES.CURRENT;
+    if (externalRequested && plannerRuntime?.secondaryFailed && !settings.plannerFallbackToCurrent) {
+        throw new Error('The selected secondary planner is unavailable for the rest of this research run');
     }
     const mode = resolvePlannerRequestMode(
-        settings.plannerConnectionMode,
-        Boolean(plannerRuntime?.profileFailed),
+        effectiveMode,
+        Boolean(plannerRuntime?.secondaryFailed),
     );
-    let profileSignal = null;
+    let secondarySignal = null;
     const runCurrentFallback = ({ error, failedSignal = null, allowed }) => (
         runAbortableRequest(fallbackSignal => fallbackPlannerToCurrent({
             error,
@@ -1519,10 +1687,16 @@ async function planNextSearch({
             generateCurrent,
         }), settings.requestTimeoutMs)
     );
+    const secondaryId = mode === PLANNER_CONNECTION_MODES.DIRECT
+        ? settings.plannerDirectProfileId
+        : settings.plannerProfileId;
+    const secondaryService = mode === PLANNER_CONNECTION_MODES.DIRECT
+        ? getPlannerDirectService(settings)
+        : getPlannerProfileService();
     const execute = signal => requestHiddenPlanner({
         mode,
-        profileId: settings.plannerProfileId,
-        // Profile fallback runs after runAbortableRequest has released its
+        profileId: secondaryId,
+        // Secondary fallback runs after runAbortableRequest has released its
         // timed-out signal, so a timeout can be distinguished from a real
         // user/chat abort without continuing work after cancellation.
         fallbackToCurrent: false,
@@ -1530,23 +1704,23 @@ async function planNextSearch({
         maxTokens: responseLength,
         signal,
         overridePayload: getPlannerProfileOverridePayload(),
-        service: getPlannerProfileService(),
+        service: secondaryService,
         generateCurrent,
     });
     let routed;
-    if (mode === PLANNER_CONNECTION_MODES.PROFILE) {
+    if (mode !== PLANNER_CONNECTION_MODES.CURRENT) {
         try {
             routed = await runAbortableRequest(signal => {
-                profileSignal = signal;
+                secondarySignal = signal;
                 return execute(signal);
             }, settings.requestTimeoutMs);
         } catch (error) {
             if (plannerRuntime) {
-                plannerRuntime.profileFailed = true;
+                plannerRuntime.secondaryFailed = true;
             }
             routed = await runCurrentFallback({
                 error,
-                failedSignal: profileSignal,
+                failedSignal: secondarySignal,
                 allowed: settings.plannerFallbackToCurrent,
             });
         }
@@ -1554,7 +1728,7 @@ async function planNextSearch({
         routed = await execute(null);
     }
     if (routed.fallbackUsed && plannerRuntime) {
-        plannerRuntime.profileFailed = true;
+        plannerRuntime.secondaryFailed = true;
         plannerRuntime.fallbackUsed = true;
         if (!plannerRuntime.fallbackNotified) {
             plannerRuntime.fallbackNotified = true;
@@ -1570,9 +1744,9 @@ async function planNextSearch({
         length: String(raw).length,
     });
     let decision = parsePlannerDecision(raw, evaluationOnly ? 1 : queryLimit);
-    if (decision.action === 'INVALID' && routed.source === PLANNER_CONNECTION_MODES.PROFILE) {
+    if (decision.action === 'INVALID' && routed.source !== PLANNER_CONNECTION_MODES.CURRENT) {
         if (plannerRuntime) {
-            plannerRuntime.profileFailed = true;
+            plannerRuntime.secondaryFailed = true;
         }
         if (settings.plannerFallbackToCurrent) {
             if (plannerRuntime) {
@@ -1581,12 +1755,12 @@ async function planNextSearch({
             }
             updateStatus('planning', '副规划器回复格式无效，本轮后续规划已回退当前回答模型');
             const fallback = await runCurrentFallback({
-                error: new Error('Planner Connection Profile returned invalid JSON'),
+                error: new Error('Secondary planner returned invalid JSON'),
                 allowed: true,
             });
             const fallbackRaw = fallback.text;
             decision = parsePlannerDecision(fallbackRaw, evaluationOnly ? 1 : queryLimit);
-            debugLog('Invalid profile planner response replaced by current-model fallback', {
+            debugLog('Invalid secondary planner response replaced by current-model fallback', {
                 round,
                 evaluationOnly,
                 length: String(fallbackRaw).length,
@@ -2025,7 +2199,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         strategyCustomPromptHash: settings.strategyCustomPromptEnabled ? hashString(settings.strategyCustomPrompt) : '',
         triggerCustomPromptEnabled: settings.triggerCustomPromptEnabled,
         triggerCustomPromptHash: settings.triggerCustomPromptEnabled ? hashString(settings.triggerCustomPrompt) : '',
-        plannerConnection: getPlannerProfileFingerprint(settings),
+        plannerConnection: getPlannerConnectionFingerprint(settings),
         plannerFallbackToCurrent: settings.plannerFallbackToCurrent,
         maxRounds: settings.maxRounds,
         maxQueriesPerRound: settings.maxQueriesPerRound,
@@ -2072,7 +2246,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     let blockedUnsafeQueries = false;
     let hadSearchFailure = false;
     const plannerRuntime = {
-        profileFailed: false,
+        secondaryFailed: false,
         fallbackUsed: false,
         fallbackNotified: false,
         isCurrent: () => isRunCurrent(epoch, chatId),
@@ -2876,6 +3050,10 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
         return;
     }
     clearPrompt();
+    if (plannerDirectSaveLocked) {
+        updateStatus('paused', '副 API 配置事务正在进行，本轮不启动隐藏研究');
+        return;
+    }
     const settings = getSettings();
     if (!isResearchBackendEnabled(settings.researchBackend) || !RESEARCH_BACKENDS.has(settings.researchBackend)) {
         settings.enabled = false;
@@ -3235,6 +3413,1233 @@ function switchBackendUi() {
     );
 }
 
+function isPlannerDirectConnectionSupported() {
+    if (!supportsPlannerDirectSecretId(CLIENT_VERSION)) return false;
+    try {
+        return typeof globalThis.SillyTavern?.getContext?.()?.ChatCompletionService?.processRequest === 'function';
+    } catch {
+        return false;
+    }
+}
+
+function getPlannerDirectUnavailableReason() {
+    return supportsPlannerDirectSecretId(CLIENT_VERSION)
+        ? '当前酒馆缺少 ChatCompletionService 直连请求接口；可改用 Connection Profile。'
+        : '直连副 API 需要 SillyTavern 1.18.0 或更高版本；已保存元数据会保留。';
+}
+
+function getPlannerDirectProfileMetadata(settings = getSettings(), profileId = settings.plannerDirectProfileId) {
+    return normalizePlannerDirectProfiles(settings.plannerDirectProfiles)
+        .find(profile => profile.id === String(profileId || '')) || null;
+}
+
+function getPlannerDirectDisplayLabel(profile) {
+    let host = '自定义端点';
+    try {
+        host = new URL(profile.apiUrl).host;
+    } catch {
+        // Normalization will flag malformed imported metadata elsewhere.
+    }
+    return `${profile.name} — ${profile.model}（${host}）`;
+}
+
+function setPlannerDirectStatus(state, text) {
+    $('#hwr_planner_direct_status').attr('data-state', state).text(text);
+}
+
+function setPlannerDirectModelListStatus(state, text) {
+    $('#hwr_planner_direct_model_list_status').attr('data-state', state).text(text);
+}
+
+function clearPlannerDirectModelList(text = '尚未拉取模型列表；也可以始终手工填写精确模型 ID。') {
+    const datalist = $('#hwr_planner_direct_models').get(0);
+    datalist?.replaceChildren();
+    setPlannerDirectModelListStatus('idle', text);
+}
+
+function populatePlannerDirectForm(profile = null) {
+    $('#hwr_planner_direct_name').val(profile?.name || '');
+    $('#hwr_planner_direct_url').val(profile?.apiUrl || '');
+    $('#hwr_planner_direct_model').val(profile?.model || '');
+    $('#hwr_planner_direct_key').val('');
+    clearPlannerDirectModelList();
+    if (!isPlannerDirectConnectionSupported()) {
+        setPlannerDirectStatus('missing', getPlannerDirectUnavailableReason());
+    } else if (!profile) {
+        setPlannerDirectStatus('missing', '新配置首次保存时必须填写 API Key。');
+    } else if (plannerDirectSecretExists(profile.secretId)) {
+        setPlannerDirectStatus('saved', 'Key 已由 SillyTavern 服务端保存，不会回显；留空不会替换。');
+    } else {
+        setPlannerDirectStatus('missing', '对应的服务端 Key 已不存在；请重新输入 Key 后保存。');
+    }
+}
+
+function updatePlannerDirectCapabilityUi() {
+    const supported = isPlannerDirectConnectionSupported();
+    const mutationLocked = plannerDirectSaveLocked;
+    $('#hwr_planner_connection_mode').prop('disabled', mutationLocked);
+    $('#hwr_planner_connection_mode option[value="direct"]').prop('disabled', !supported);
+    const controls = [
+        '#hwr_planner_direct_connection',
+        '#hwr_new_planner_direct',
+        '#hwr_planner_direct_name',
+        '#hwr_planner_direct_url',
+        '#hwr_planner_direct_model',
+        '#hwr_fetch_planner_direct_models',
+        '#hwr_planner_direct_key',
+        '#hwr_save_planner_direct',
+        '#hwr_delete_planner_direct',
+        '#hwr_test_planner_direct',
+    ].join(', ');
+    $(controls).prop('disabled', !supported || mutationLocked);
+    if (!supported) {
+        setPlannerDirectStatus('missing', getPlannerDirectUnavailableReason());
+    }
+}
+
+function refreshPlannerDirectProfilesUi() {
+    const settings = getSettings();
+    const profiles = normalizePlannerDirectProfiles(settings.plannerDirectProfiles);
+    const select = $('#hwr_planner_direct_connection');
+    select.empty().append($('<option>').val('').text('新建或选择一个副 API 配置'));
+    for (const profile of profiles) {
+        const suffix = plannerDirectSecretExists(profile.secretId) ? '' : '（Key 缺失）';
+        select.append($('<option>').val(profile.id).text(`${getPlannerDirectDisplayLabel(profile)}${suffix}`));
+    }
+    select.val(settings.plannerDirectProfileId);
+    const selected = profiles.find(profile => profile.id === settings.plannerDirectProfileId) || null;
+    populatePlannerDirectForm(selected);
+    updatePlannerDirectCapabilityUi();
+}
+
+function confirmPlannerDirectCredentialTarget(apiUrl) {
+    const url = new URL(apiUrl);
+    const hostname = url.hostname.toLowerCase();
+    const loopback = ['localhost', '127.0.0.1', '::1'].includes(hostname);
+    if (loopback) return true;
+    const warnings = [`API Key 和隐藏规划上下文将发送到 ${url.host}。请确认这是你信任的中转或服务商。`];
+    if (url.protocol !== 'https:') {
+        warnings.push('该远程地址使用未加密 HTTP，网络中的其他设备可能读取凭据和请求内容。');
+    }
+    return confirm(`${warnings.join('\n\n')}\n\n确认保存吗？`);
+}
+
+async function readPersistedPlannerSettingsEnvelopeStrict() {
+    const response = await fetch('/api/settings/get', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        cache: 'no-store',
+        body: JSON.stringify({}),
+    });
+    if (!response.ok) throw new Error(`无法回读酒馆设置（HTTP ${response.status}）`);
+    const payload = await response.json();
+    const persistedRoot = typeof payload?.settings === 'string'
+        ? JSON.parse(payload.settings)
+        : payload?.settings;
+    if (!persistedRoot || typeof persistedRoot !== 'object' || Array.isArray(persistedRoot)) {
+        throw new Error('酒馆设置回读格式无效');
+    }
+    const extensionSettings = persistedRoot.extension_settings;
+    const safeExtensionSettings = extensionSettings
+        && typeof extensionSettings === 'object'
+        && !Array.isArray(extensionSettings)
+        ? extensionSettings
+        : {};
+    return Object.freeze({
+        direct: projectPlannerDirectSettingsSnapshot(safeExtensionSettings[SETTINGS_KEY] || {}),
+        connectionProfileSecretReferences:
+            projectPlannerDirectConnectionProfileSecretReferences(safeExtensionSettings),
+    });
+}
+
+async function readPersistedPlannerDirectSettingsStrict() {
+    return (await readPersistedPlannerSettingsEnvelopeStrict()).direct;
+}
+
+async function saveSettingsWithSuccessSignal() {
+    let completed = false;
+    const markCompleted = () => { completed = true; };
+    eventSource.on(event_types.SETTINGS_UPDATED, markCompleted);
+    try {
+        await saveSettings();
+    } finally {
+        eventSource.removeListener(event_types.SETTINGS_UPDATED, markCompleted);
+    }
+    if (!completed) throw new Error('酒馆没有确认完整设置保存成功');
+}
+
+async function flushPendingSettingsBeforePlannerDirectMutation(settings) {
+    // The stock debouncer captures global settings only when its timer fires.
+    // Cancel that timer, persist the latest complete in-memory state now, and
+    // prove the server snapshot before any secret write or metadata mutation.
+    cancelDebounce(saveSettingsDebounced);
+    try {
+        await saveSettingsWithSuccessSignal();
+        const persisted = await readPersistedPlannerDirectSettingsStrict();
+        const expected = projectPlannerDirectSettingsSnapshot(settings);
+        if (!arePlannerDirectSettingsSnapshotsEqual(persisted, expected)) {
+            throw new Error('酒馆现有设置尚未稳定落盘；未开始修改副 API 配置或 Key');
+        }
+    } catch (error) {
+        // No direct mutation has begun. Requeue the complete in-memory state so
+        // cancelling the stock timer cannot discard unrelated user settings.
+        saveSettingsDebounced();
+        throw error;
+    }
+}
+
+async function saveAndVerifyPlannerDirectSettings(settings) {
+    let saveError = null;
+    try {
+        await saveSettingsWithSuccessSignal();
+    } catch (error) {
+        saveError = error;
+    }
+    try {
+        const persisted = await readPersistedPlannerDirectSettingsStrict();
+        const expected = projectPlannerDirectSettingsSnapshot(settings);
+        return arePlannerDirectSettingsSnapshotsEqual(persisted, expected)
+            ? { status: 'verified', error: saveError }
+            : { status: 'mismatch', error: saveError };
+    } catch (error) {
+        return { status: 'unverifiable', error: error || saveError };
+    }
+}
+
+async function readPlannerCustomSecretStateStrict() {
+    const response = await fetch('/api/secrets/read', {
+        method: 'POST',
+        headers: getRequestHeaders({ omitContentType: true }),
+        cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`无法回读 Custom Key 状态（HTTP ${response.status}）`);
+    const payload = await response.json();
+    const state = projectPlannerDirectCustomSecretState(payload, SECRET_KEYS.CUSTOM);
+    if (state.status !== PLANNER_DIRECT_SECRET_RECORDS_STATUS.KNOWN) {
+        throw new Error('酒馆返回的 Custom Key 状态不完整，无法安全继续');
+    }
+    return state;
+}
+
+async function mirrorPlannerSecretState() {
+    // Strict reads are the transaction proof. This stock helper only refreshes
+    // SillyTavern's exported live UI state and may swallow its own errors.
+    await readSecretState();
+}
+
+async function writePlannerCustomSecretVerified(apiKey, label, beforeState, assertBeforeWrite) {
+    let responseId = '';
+    let writeError = null;
+    try {
+        assertBeforeWrite?.();
+        const response = await fetch('/api/secrets/write', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ key: SECRET_KEYS.CUSTOM, value: apiKey, label }),
+        });
+        if (!response.ok) throw new Error(`Key 写入失败（HTTP ${response.status}）`);
+        const payload = await response.json();
+        responseId = String(payload?.id || '').trim();
+        if (!responseId) throw new Error('Key 写入接口没有返回 ID');
+    } catch (error) {
+        writeError = error;
+    }
+
+    let afterState;
+    try {
+        afterState = await readPlannerCustomSecretStateStrict();
+    } catch (readError) {
+        const error = new Error(
+            `Key 写入结果无法确认；未继续保存配置。请在酒馆密钥管理器中检查标签“${label}”。`,
+            { cause: writeError || readError },
+        );
+        error.plannerSecretId = responseId;
+        throw error;
+    }
+    const created = findNewPlannerDirectSecret({
+        before: beforeState,
+        after: afterState,
+        responseId,
+        expectedLabel: label,
+    });
+    if (!created) {
+        const recoverableById = responseId
+            ? findNewPlannerDirectSecret({ before: beforeState, after: afterState, responseId })
+            : null;
+        const error = new Error(
+            writeError
+                ? `Key 写入失败且无法从服务端状态恢复：${writeError.message || writeError}`
+                : recoverableById
+                    ? '刚写入的 Key 在并发操作中被改名或改变状态；未保存配置，将仅执行安全恢复'
+                    : '服务端状态未唯一确认刚写入的 Key；未继续保存配置',
+        );
+        if (recoverableById) error.plannerSecretId = recoverableById.id;
+        throw error;
+    }
+    return { secret: created, state: afterState };
+}
+
+async function rotatePlannerCustomSecret(secretId) {
+    const response = await fetch('/api/secrets/rotate', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ key: SECRET_KEYS.CUSTOM, id: secretId }),
+    });
+    if (!response.ok) throw new Error('未能切换目标 Custom API Key');
+    const state = await readPlannerCustomSecretStateStrict();
+    if (state.activeId !== secretId) {
+        throw new Error('SillyTavern 未确认目标 Custom API Key 已激活');
+    }
+    await mirrorPlannerSecretState();
+    return state;
+}
+
+async function deletePlannerCustomSecretVerified(secretId) {
+    const response = await fetch('/api/secrets/delete', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ key: SECRET_KEYS.CUSTOM, id: secretId }),
+    });
+    if (!response.ok) throw new Error(`Key 删除失败（HTTP ${response.status}）`);
+    const state = await readPlannerCustomSecretStateStrict();
+    if (state.records.some(record => record.id === secretId)) {
+        throw new Error('SillyTavern 未确认目标 Key 已删除');
+    }
+    await mirrorPlannerSecretState();
+    return state;
+}
+
+async function restorePreviousPlannerActiveIfSafe(newSecretId, previousActiveId) {
+    const state = await readPlannerCustomSecretStateStrict();
+    if (!previousActiveId) {
+        if (state.activeId === newSecretId) {
+            return {
+                state,
+                warning: '保存前 Custom Key 槽为空；原版酒馆要求非空槽必须有一个活动项，因此新 Key 现为全局活动 Custom Key。插件未改变主模型 URL 或模型，但以后未指定 secret-id 的 Custom 请求可能使用它。',
+            };
+        }
+        if (state.activeId && state.activeId !== newSecretId) {
+            return {
+                state,
+                warning: '保存期间检测到其他页面或扩展改变了活动 Custom Key；已保留其新状态，未强行覆盖。',
+            };
+        }
+        return { state, warning: '' };
+    }
+    if (shouldRestorePreviousPlannerDirectSecret(state, previousActiveId, newSecretId)) {
+        return { state: await rotatePlannerCustomSecret(previousActiveId), warning: '' };
+    }
+    if (state.activeId && state.activeId !== newSecretId && state.activeId !== previousActiveId) {
+        return {
+            state,
+            warning: '保存期间检测到其他页面或扩展改变了活动 Custom Key；已保留其新状态，未强行覆盖。',
+        };
+    }
+    if (state.activeId === newSecretId
+        && !state.records.some(record => record.id === previousActiveId)) {
+        return {
+            state,
+            warning: '保存前的活动 Custom Key 已不存在，无法恢复；新 Key 仍保持活动。',
+        };
+    }
+    return { state, warning: '' };
+}
+
+function getPlannerDirectCleanupWarning(reason, subject = 'Key') {
+    switch (reason) {
+        case PLANNER_DIRECT_SECRET_CLEANUP_REASON.REFERENCED:
+            return `${subject} 仍被其他副 API 配置引用，未自动删除。`;
+        case PLANNER_DIRECT_SECRET_CLEANUP_REASON.ACTIVE:
+            return `${subject} 仍是酒馆当前活动 Custom Key，未自动删除。`;
+        case PLANNER_DIRECT_SECRET_CLEANUP_REASON.NOT_FOUND:
+            return '';
+        case PLANNER_DIRECT_SECRET_CLEANUP_REASON.PROFILE_STATE_UNKNOWN:
+        case PLANNER_DIRECT_SECRET_CLEANUP_REASON.SECRET_STATE_UNKNOWN:
+            return `${subject} 的引用或服务端状态无法确认，未自动删除。`;
+        case 'NOT_PLUGIN_OWNED':
+            return `${subject} 不是可确认由本插件创建的密钥，未自动删除。`;
+        case 'CONNECTION_PROFILE_REFERENCED':
+            return `${subject} 仍被 Connection Manager Profile 引用，未自动删除。`;
+        case 'CONNECTION_PROFILE_STATE_UNKNOWN':
+            return `${subject} 的 Connection Manager 引用状态无法确认，未自动删除。`;
+        default:
+            return `${subject} 未通过安全清理检查，未自动删除。`;
+    }
+}
+
+function getPlannerDirectConnectionProfileReferenceState(secretId) {
+    try {
+        const service = globalThis.SillyTavern?.getContext?.()?.ConnectionManagerRequestService;
+        if (!service || typeof service.getSupportedProfiles !== 'function') return 'unknown';
+        const profiles = service.getSupportedProfiles();
+        if (!Array.isArray(profiles)) return 'unknown';
+        return profiles.some(profile => String(profile?.['secret-id'] || '') === secretId)
+            ? 'referenced'
+            : 'unreferenced';
+    } catch {
+        return 'unknown';
+    }
+}
+
+function getPersistedPlannerDirectConnectionProfileReferenceState(references, secretId) {
+    if (references?.status !== PLANNER_DIRECT_SECRET_RECORDS_STATUS.KNOWN
+        || !Array.isArray(references.secretIds)) {
+        return 'unknown';
+    }
+    const seen = new Set();
+    for (const id of references.secretIds) {
+        if (typeof id !== 'string' || !id || /[\s\u0000-\u001f\u007f]/u.test(id) || seen.has(id)) {
+            return 'unknown';
+        }
+        seen.add(id);
+    }
+    return seen.has(secretId) ? 'referenced' : 'unreferenced';
+}
+
+function authorizePlannerDirectSecretCleanup({
+    profiles,
+    secretState,
+    secretId,
+    connectionProfileSecretReferences,
+}) {
+    const decision = getPlannerDirectSecretCleanupDecision({
+        profiles,
+        secretRecords: secretState,
+        secretId,
+    });
+    if (!decision.safe) return decision;
+    const record = secretState.records.find(item => item.id === secretId);
+    if (!record?.label.startsWith(`${DISPLAY_NAME} 副规划 · `)) {
+        return { safe: false, reason: 'NOT_PLUGIN_OWNED' };
+    }
+    const persistedReference = getPersistedPlannerDirectConnectionProfileReferenceState(
+        connectionProfileSecretReferences,
+        secretId,
+    );
+    if (persistedReference === 'referenced') {
+        return { safe: false, reason: 'CONNECTION_PROFILE_REFERENCED' };
+    }
+    if (persistedReference !== 'unreferenced') {
+        return { safe: false, reason: 'CONNECTION_PROFILE_STATE_UNKNOWN' };
+    }
+    const liveReference = getPlannerDirectConnectionProfileReferenceState(secretId);
+    if (liveReference === 'referenced') {
+        return { safe: false, reason: 'CONNECTION_PROFILE_REFERENCED' };
+    }
+    if (liveReference !== 'unreferenced') {
+        return { safe: false, reason: 'CONNECTION_PROFILE_STATE_UNKNOWN' };
+    }
+    return decision;
+}
+
+async function rollbackPlannerDirectSecret(secretId, previousActiveId) {
+    const failures = [];
+    try {
+        const state = await readPlannerCustomSecretStateStrict();
+        if (shouldRestorePreviousPlannerDirectSecret(state, previousActiveId, secretId)) {
+            await rotatePlannerCustomSecret(previousActiveId);
+        }
+    } catch (error) {
+        failures.push(`恢复活动 Key 失败：${error.message || error}`);
+    }
+    try {
+        const persisted = await readPersistedPlannerSettingsEnvelopeStrict();
+        const state = await readPlannerCustomSecretStateStrict();
+        const decision = authorizePlannerDirectSecretCleanup({
+            profiles: persisted.direct.profiles,
+            secretState: state,
+            secretId,
+            connectionProfileSecretReferences: persisted.connectionProfileSecretReferences,
+        });
+        if (decision.safe) {
+            await deletePlannerCustomSecretVerified(secretId);
+        } else {
+            const warning = getPlannerDirectCleanupWarning(decision.reason, '新 Key');
+            if (warning) failures.push(warning);
+        }
+    } catch (error) {
+        failures.push(`清理新 Key 失败：${error.message || error}`);
+    }
+    if (failures.length) throw new Error(failures.join('；'));
+}
+
+const PLANNER_DIRECT_HOST_GENERATION_CONTROL_SELECTOR = [
+    '#send_but',
+    '#option_regenerate',
+    '#option_continue',
+    '#option_impersonate',
+    '#mes_continue',
+    '#mes_impersonate',
+    '.last_mes .swipe_right',
+    '.last_mes .swipe_left',
+    '.mes_stop',
+].join(', ');
+const PLANNER_DIRECT_CREDENTIAL_LOCK_WARNING = '无法证明酒馆全局 Custom 活动 Key 已恢复到安全状态；当前标签页已保持发送锁定。请先在酒馆密钥管理器中检查活动 Custom Key，再刷新页面。';
+
+function beginPlannerDirectCredentialRequestGuard() {
+    if (plannerDirectCredentialRequestGuard) {
+        throw new Error('已有无法安全解除的 Custom 凭据保护；请检查酒馆密钥管理器并刷新页面');
+    }
+    const guard = Object.freeze({
+        sentinelSecretId: `hwr-missing-${createPlannerDirectProfileId()}`,
+    });
+    plannerDirectCredentialRequestGuard = guard;
+    // Keep a passive first/last pair installed for the lifetime of the page.
+    // Reposition it synchronously before the transaction's first await so an
+    // already-started or newly-started stock generateRaw() cannot fall through
+    // to the temporarily active planner Key.
+    eventSource.makeFirst(
+        event_types.CHAT_COMPLETION_SETTINGS_READY,
+        capturePlannerDirectCredentialWindowRequest,
+    );
+    eventSource.makeLast(
+        event_types.CHAT_COMPLETION_SETTINGS_READY,
+        enforcePlannerDirectCredentialWindowRequest,
+    );
+    return guard;
+}
+
+function assertPlannerDirectCredentialRequestGuard(guard) {
+    if (!guard || plannerDirectCredentialRequestGuard !== guard) {
+        throw new Error('Custom 凭据保护状态已改变；未写入副 API Key');
+    }
+    // Hooks registered later in page startup must not silently move the final
+    // seal ahead of ordinary request adapters. This does not attempt to defend
+    // against hostile same-origin code, which shares the page's full authority.
+    eventSource.makeFirst(
+        event_types.CHAT_COMPLETION_SETTINGS_READY,
+        capturePlannerDirectCredentialWindowRequest,
+    );
+    eventSource.makeLast(
+        event_types.CHAT_COMPLETION_SETTINGS_READY,
+        enforcePlannerDirectCredentialWindowRequest,
+    );
+}
+
+function releasePlannerDirectCredentialRequestGuard(guard, credentialStateSafe) {
+    if (!guard || !credentialStateSafe || plannerDirectCredentialRequestGuard !== guard) return false;
+    plannerDirectCredentialRequestGuard = null;
+    return true;
+}
+
+function acquirePlannerDirectHostSendLock() {
+    if (activeRunEpoch !== null || is_send_press || is_group_generating) return null;
+
+    let generationIntervened = false;
+    let hostGenerationActive = false;
+    let activationForbidden = false;
+    let released = false;
+    let interactionGuardsActive = false;
+    const guardedElements = Array.from(
+        document.querySelectorAll(PLANNER_DIRECT_HOST_GENERATION_CONTROL_SELECTOR),
+    ).map(element => ({
+        element,
+        disabled: 'disabled' in element ? Boolean(element.disabled) : undefined,
+        disabledAttribute: element.getAttribute('disabled'),
+        ariaDisabled: element.getAttribute('aria-disabled'),
+        pointerEvents: element.style.pointerEvents,
+        display: element.style.display,
+        visibility: element.style.visibility,
+    }));
+
+    function blockGenerationInteraction(event) {
+        const target = event.target?.closest?.(PLANNER_DIRECT_HOST_GENERATION_CONTROL_SELECTOR);
+        const sendTextareaEnter = event.type === 'keydown'
+            && event.target?.matches?.('#send_textarea')
+            && event.key === 'Enter'
+            && !event.shiftKey;
+        const guardedControlKey = event.type === 'keydown'
+            && target
+            && (event.key === 'Enter' || event.key === ' ');
+        const guardedEscape = (event.type === 'keydown' || event.type === 'keyup')
+            && event.key === 'Escape';
+        if (!target && !sendTextareaEnter && !guardedEscape) return;
+        if ((event.type === 'keydown' || event.type === 'keyup')
+            && !sendTextareaEnter
+            && !guardedControlKey
+            && !guardedEscape) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+    }
+    const applyInteractionGuards = () => {
+        if (interactionGuardsActive) return;
+        interactionGuardsActive = true;
+        document.addEventListener('click', blockGenerationInteraction, true);
+        document.addEventListener('keydown', blockGenerationInteraction, true);
+        document.addEventListener('keyup', blockGenerationInteraction, true);
+        for (const { element } of guardedElements) {
+            if ('disabled' in element) element.disabled = true;
+            element.setAttribute('disabled', '');
+            element.setAttribute('aria-disabled', 'true');
+            element.style.pointerEvents = 'none';
+            if (element.matches?.('.mes_stop')) element.style.visibility = 'hidden';
+        }
+    };
+    const restoreInteractionGuards = () => {
+        if (!interactionGuardsActive) return;
+        interactionGuardsActive = false;
+        document.removeEventListener('click', blockGenerationInteraction, true);
+        document.removeEventListener('keydown', blockGenerationInteraction, true);
+        document.removeEventListener('keyup', blockGenerationInteraction, true);
+        for (const snapshot of guardedElements) {
+            const { element } = snapshot;
+            if (snapshot.disabledAttribute === null) element.removeAttribute('disabled');
+            else element.setAttribute('disabled', snapshot.disabledAttribute);
+            if (snapshot.disabled !== undefined) element.disabled = snapshot.disabled;
+            if (snapshot.ariaDisabled === null) element.removeAttribute('aria-disabled');
+            else element.setAttribute('aria-disabled', snapshot.ariaDisabled);
+            element.style.pointerEvents = snapshot.pointerEvents;
+            element.style.visibility = snapshot.visibility;
+        }
+    };
+    const restoreStopPresentationSnapshot = () => {
+        for (const snapshot of guardedElements) {
+            if (!snapshot.element.matches?.('.mes_stop')) continue;
+            snapshot.element.style.display = snapshot.display;
+            snapshot.element.style.visibility = snapshot.visibility;
+        }
+    };
+    const enforceCredentialSeal = () => {
+        if (!activationForbidden || released || hostGenerationActive) return;
+        setSendButtonState(true);
+        deactivateSendButtons();
+        applyInteractionGuards();
+    };
+    const onGenerationStarted = () => {
+        generationIntervened = true;
+        hostGenerationActive = true;
+        // A programmatic generation can bypass the visible controls. Let that
+        // real generation expose and use its own Stop control until it finishes.
+        restoreInteractionGuards();
+    };
+    const onGenerationFinished = () => {
+        hostGenerationActive = false;
+        if (!activationForbidden || released) return;
+        // Stock activateSendButtons() emits GENERATION_ENDED from inside
+        // hideStopButton(), before it finishes restoring swipes/body state.
+        // Re-seal in a microtask so the credential lock wins after teardown.
+        Promise.resolve().then(enforceCredentialSeal);
+    };
+    const removeLifecycleListeners = () => {
+        eventSource.removeListener(event_types.GENERATION_STARTED, onGenerationStarted);
+        eventSource.removeListener(event_types.GENERATION_ENDED, onGenerationFinished);
+        eventSource.removeListener(event_types.GENERATION_STOPPED, onGenerationFinished);
+    };
+
+    eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
+    eventSource.on(event_types.GENERATION_ENDED, onGenerationFinished);
+    eventSource.on(event_types.GENERATION_STOPPED, onGenerationFinished);
+    if (activeRunEpoch !== null || is_send_press || is_group_generating) {
+        removeLifecycleListeners();
+        return null;
+    }
+    applyInteractionGuards();
+    // deactivateSendButtons() alone does not change is_send_press. Borrow the
+    // real flag; the interaction guard keeps Stop flex but invisible/disabled,
+    // so any later host activate still emits GENERATION_ENDED before re-sealing.
+    setSendButtonState(true);
+    deactivateSendButtons();
+
+    return Object.freeze({
+        assertSafe() {
+            if (released
+                || generationIntervened
+                || activeRunEpoch !== null
+                || is_group_generating
+                || !is_send_press) {
+                throw new Error('副 API 配置事务期间检测到新的生成或发送状态变化；已停止本次修改');
+            }
+        },
+        release({ allowActivate = true } = {}) {
+            if (released) return false;
+            // Generate() can emit STARTED, discover online_status=no_connection,
+            // clear is_send_press and return without ENDED/STOPPED.
+            if (hostGenerationActive
+                && !is_send_press
+                && !is_group_generating
+                && activeRunEpoch === null) {
+                hostGenerationActive = false;
+            }
+            const concurrentGeneration = hostGenerationActive
+                || activeRunEpoch !== null
+                || is_group_generating;
+            if (!allowActivate) {
+                activationForbidden = true;
+                if (concurrentGeneration) restoreInteractionGuards();
+                else enforceCredentialSeal();
+                // Keep lifecycle listeners alive until reload. A real generation
+                // may temporarily own Stop, but ENDED/STOPPED re-seals the page.
+                return false;
+            }
+            released = true;
+            removeLifecycleListeners();
+            restoreInteractionGuards();
+            if (!concurrentGeneration) {
+                restoreStopPresentationSnapshot();
+                setSendButtonState(false);
+                activateSendButtons();
+                return true;
+            }
+            return false;
+        },
+    });
+}
+function createPlannerDirectProfileId() {
+    if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+    return `planner-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isPlannerDirectMutationBusy() {
+    return activeRunEpoch !== null || is_send_press || is_group_generating || plannerDirectTestLocked;
+}
+
+async function savePlannerDirectProfile() {
+    if (plannerDirectSaveLocked) return;
+    if (isPlannerDirectMutationBusy()) {
+        $('#hwr_planner_direct_key').val('');
+        toastr.warning('当前有生成、隐藏研究或副规划器测试正在运行，请结束后再保存副 API 配置');
+        return;
+    }
+    if (!isPlannerDirectConnectionSupported()) {
+        $('#hwr_planner_direct_key').val('');
+        toastr.warning('直连副 API 需要完整的 SillyTavern 1.18.0 或更高版本接口', DISPLAY_NAME);
+        return;
+    }
+    const settings = getSettings();
+    const profiles = normalizePlannerDirectProfiles(settings.plannerDirectProfiles);
+    const editingId = String($('#hwr_planner_direct_connection').val() || '');
+    const existing = profiles.find(profile => profile.id === editingId) || null;
+    let apiKey = String($('#hwr_planner_direct_key').val() || '').trim();
+    $('#hwr_planner_direct_key').val('');
+    plannerDirectSaveLocked = true;
+    updatePlannerDirectCapabilityUi();
+    setPlannerDirectStatus('dirty', '正在保存配置…');
+
+    let newSecretId = '';
+    let previousActiveId = '';
+    let savedProfile = null;
+    let commitVerified = false;
+    let commitUncertain = '';
+    let activeRestoreWarning = '';
+    let continuePostCommit = false;
+    let hostSendLock = null;
+    let credentialRequestGuard = null;
+    let credentialStateSafe = true;
+    let credentialBaselineState = null;
+    const previousProfiles = settings.plannerDirectProfiles;
+    const previousSelectedId = settings.plannerDirectProfileId;
+    const previousMode = settings.plannerConnectionMode;
+    try {
+        if (!existing && profiles.length >= PLANNER_DIRECT_PROFILE_LIMIT) {
+            throw new Error(`最多保存 ${PLANNER_DIRECT_PROFILE_LIMIT} 个副 API 配置`);
+        }
+        const apiUrl = normalizePlannerDirectApiUrl($('#hwr_planner_direct_url').val());
+        const draft = normalizePlannerDirectProfile({
+            id: existing?.id || createPlannerDirectProfileId(),
+            name: $('#hwr_planner_direct_name').val(),
+            apiUrl,
+            model: $('#hwr_planner_direct_model').val(),
+            secretId: existing?.secretId || '',
+        });
+        if (apiKey) {
+            // This must stay before the first await in an API-Key save. Until
+            // strict readback proves the final credential state, every implicit
+            // Custom request is forced to a unique nonexistent secret-id.
+            credentialRequestGuard = beginPlannerDirectCredentialRequestGuard();
+        }
+        const confirmedSecretState = await readPlannerCustomSecretStateStrict();
+        await mirrorPlannerSecretState();
+        const existingSecretReady = Boolean(
+            existing && confirmedSecretState.records.some(record => record.id === existing.secretId),
+        );
+        const keyRequired = !existing || !existingSecretReady || existing.apiUrl !== draft.apiUrl;
+        if (!apiKey && keyRequired) {
+            throw new Error(existing?.apiUrl !== draft.apiUrl
+                ? 'URL 已改变，请重新输入 API Key 以确认新的发送目标'
+                : '首次保存或 Key 缺失时必须输入 API Key');
+        }
+        if (apiKey && !confirmPlannerDirectCredentialTarget(draft.apiUrl)) {
+            setPlannerDirectStatus(existingSecretReady ? 'saved' : 'missing', '已取消保存，现有配置未改变。');
+            return;
+        }
+        if (apiKey && confirmedSecretState.records.length === 0 && !confirm(
+            '当前酒馆还没有任何 Custom Key。原版 secrets 机制要求：只要保存第一把 Custom Key，它就必须成为全局活动项，无法保持“无活动 Key”。\n\n插件不会改变当前回答模型的 URL 或模型；但当前或以后任何使用 Custom 来源且没有精确 secret-id 的请求，都可能把这把规划 Key 发往其自己的 Custom URL。\n\n若不接受这个共享密钥槽副作用，请取消并改用 Connection Manager Profile，或先在酒馆中建立你希望保持活动的 Custom Key。仍然继续保存吗？',
+        )) {
+            setPlannerDirectStatus(existingSecretReady ? 'saved' : 'missing', '已取消保存；未写入第一把全局活动 Custom Key。');
+            return;
+        }
+
+        hostSendLock = acquirePlannerDirectHostSendLock();
+        if (!hostSendLock) {
+            throw new Error('发送状态已改变，未开始副 API 配置事务；请结束当前生成后重试');
+        }
+        hostSendLock.assertSafe();
+        await flushPendingSettingsBeforePlannerDirectMutation(settings);
+        hostSendLock.assertSafe();
+        const beforeSecretState = await readPlannerCustomSecretStateStrict();
+        credentialBaselineState = beforeSecretState;
+        if (!arePlannerDirectCustomSecretStatesEqual(confirmedSecretState, beforeSecretState)) {
+            throw new Error('确认期间 Custom Key 状态已被其他页面或扩展改变；未写入 Key，请重试');
+        }
+        previousActiveId = beforeSecretState.activeId;
+        let secretId = existing?.secretId || '';
+        if (apiKey) {
+            const writeNonce = createPlannerDirectProfileId().slice(-12);
+            const writeLabel = `${DISPLAY_NAME} 副规划 · ${draft.name} · ${writeNonce}`;
+            const written = await writePlannerCustomSecretVerified(
+                apiKey,
+                writeLabel,
+                beforeSecretState,
+                () => {
+                    assertPlannerDirectCredentialRequestGuard(credentialRequestGuard);
+                    hostSendLock.assertSafe();
+                    credentialStateSafe = false;
+                },
+            );
+            newSecretId = written.secret.id;
+            const restoreResult = await restorePreviousPlannerActiveIfSafe(newSecretId, previousActiveId);
+            await mirrorPlannerSecretState();
+            credentialStateSafe = !previousActiveId || restoreResult.state.activeId !== newSecretId;
+            if (!credentialStateSafe) {
+                throw new Error('新规划 Key 仍是活动 Custom Key，且原活动 Key 无法恢复');
+            }
+            activeRestoreWarning = restoreResult.warning;
+            secretId = newSecretId;
+        }
+
+        hostSendLock.assertSafe();
+        savedProfile = normalizePlannerDirectProfile({ ...draft, secretId });
+        const nextProfiles = existing
+            ? profiles.map(profile => profile.id === existing.id ? savedProfile : profile)
+            : [...profiles, savedProfile];
+        settings.plannerDirectProfiles = normalizePlannerDirectProfiles(nextProfiles).map(profile => ({ ...profile }));
+        settings.plannerDirectProfileId = savedProfile.id;
+        settings.plannerConnectionMode = PLANNER_CONNECTION_MODES.DIRECT;
+        normalizeSettings(settings);
+        hostSendLock.assertSafe();
+
+        const persistence = await saveAndVerifyPlannerDirectSettings(settings);
+        if (persistence.status === 'mismatch') {
+            throw new Error('酒馆未把副 API 配置写入设置文件，已取消本次保存');
+        }
+        if (persistence.status === 'unverifiable') {
+            commitUncertain = String(persistence.error?.message || persistence.error || '设置回读失败');
+        } else {
+            commitVerified = true;
+        }
+        continuePostCommit = true;
+    } catch (error) {
+        if (!newSecretId && error?.plannerSecretId) {
+            newSecretId = String(error.plannerSecretId);
+        }
+        let rollbackWarning = '';
+        if (!commitVerified && !commitUncertain) {
+            settings.plannerDirectProfiles = previousProfiles;
+            settings.plannerDirectProfileId = previousSelectedId;
+            settings.plannerConnectionMode = previousMode;
+            normalizeSettings(settings);
+            if (!newSecretId && !credentialStateSafe && credentialBaselineState) {
+                try {
+                    const currentState = await readPlannerCustomSecretStateStrict();
+                    credentialStateSafe = arePlannerDirectCustomSecretStatesEqual(
+                        credentialBaselineState,
+                        currentState,
+                    );
+                    if (credentialStateSafe) await mirrorPlannerSecretState();
+                } catch (proofError) {
+                    rollbackWarning = `无法回读确认活动 Key：${proofError.message || proofError}`;
+                }
+            }
+            if (newSecretId) {
+                try {
+                    await rollbackPlannerDirectSecret(newSecretId, previousActiveId);
+                } catch (rollbackError) {
+                    rollbackWarning = String(rollbackError.message || rollbackError);
+                }
+                try {
+                    const rollbackState = await readPlannerCustomSecretStateStrict();
+                    credentialStateSafe = rollbackState.activeId !== newSecretId;
+                    if (credentialStateSafe) await mirrorPlannerSecretState();
+                    else rollbackWarning = [
+                        rollbackWarning,
+                        '新规划 Key 仍是全局活动 Custom Key',
+                    ].filter(Boolean).join('；');
+                } catch (proofError) {
+                    credentialStateSafe = false;
+                    rollbackWarning = [
+                        rollbackWarning,
+                        `无法回读确认活动 Key：${proofError.message || proofError}`,
+                    ].filter(Boolean).join('；');
+                }
+            }
+        }
+        const credentialWarning = credentialStateSafe ? '' : PLANNER_DIRECT_CREDENTIAL_LOCK_WARNING;
+        const message = [
+            String(error.message || error),
+            rollbackWarning,
+            credentialWarning,
+        ].filter(Boolean).join('；');
+        setPlannerDirectStatus('missing', `保存失败：${message}`);
+        toastr.error(message, '副 API 配置保存失败');
+        refreshPlannerDirectProfilesUi();
+        updatePlannerConnectionUi();
+        return;
+    } finally {
+        apiKey = '';
+        $('#hwr_planner_direct_key').val('');
+        if (!continuePostCommit) {
+            plannerDirectSaveLocked = false;
+            updatePlannerDirectCapabilityUi();
+            hostSendLock?.release({ allowActivate: credentialStateSafe });
+            hostSendLock = null;
+            releasePlannerDirectCredentialRequestGuard(credentialRequestGuard, credentialStateSafe);
+        }
+    }
+
+    try {
+        invalidateRun('Direct planner profile saved', { clearCaches: true });
+        refreshPlannerDirectProfilesUi();
+        updatePlannerConnectionUi();
+        if (commitUncertain) {
+            setPlannerDirectStatus('dirty', `配置保存结果无法确认：${commitUncertain}`);
+            toastr.warning('无法从服务端回读确认配置是否落盘；为防止误删，现有和新 Key 都已保留。请刷新页面并在密钥管理器中检查。', DISPLAY_NAME);
+            return;
+        }
+
+        let cleanupWarning = activeRestoreWarning;
+        if (newSecretId && existing?.secretId && existing.secretId !== newSecretId) {
+            try {
+                const persisted = await readPersistedPlannerSettingsEnvelopeStrict();
+                const state = await readPlannerCustomSecretStateStrict();
+                const decision = authorizePlannerDirectSecretCleanup({
+                    profiles: persisted.direct.profiles,
+                    secretState: state,
+                    secretId: existing.secretId,
+                    connectionProfileSecretReferences: persisted.connectionProfileSecretReferences,
+                });
+                if (decision.safe) {
+                    hostSendLock.assertSafe();
+                    await deletePlannerCustomSecretVerified(existing.secretId);
+                } else {
+                    cleanupWarning = [
+                        cleanupWarning,
+                        getPlannerDirectCleanupWarning(decision.reason, '旧 Key'),
+                    ].filter(Boolean).join(' ');
+                }
+            } catch (error) {
+                cleanupWarning = [cleanupWarning, String(error.message || error)].filter(Boolean).join(' ');
+            }
+        }
+        if (cleanupWarning) {
+            setPlannerDirectStatus('saved', `配置已保存；${cleanupWarning}`);
+            toastr.warning('配置已保存，但有 Key 状态未自动改变；请按状态提示检查酒馆密钥管理器。', DISPLAY_NAME);
+        } else {
+            toastr.success(`副 API 配置“${savedProfile.name}”已保存并选中`, DISPLAY_NAME);
+        }
+    } finally {
+        plannerDirectSaveLocked = false;
+        updatePlannerDirectCapabilityUi();
+        hostSendLock?.release({ allowActivate: credentialStateSafe });
+        hostSendLock = null;
+        releasePlannerDirectCredentialRequestGuard(credentialRequestGuard, credentialStateSafe);
+    }
+}
+
+async function deletePlannerDirectProfile() {
+    if (plannerDirectSaveLocked) return;
+    if (isPlannerDirectMutationBusy()) {
+        toastr.warning('当前有生成、隐藏研究或副规划器测试正在运行，请结束后再删除副 API 配置');
+        return;
+    }
+    const settings = getSettings();
+    const profile = getPlannerDirectProfileMetadata(settings);
+    if (!profile) {
+        toastr.info('当前没有已保存的副 API 配置', DISPLAY_NAME);
+        return;
+    }
+    const profiles = normalizePlannerDirectProfiles(settings.plannerDirectProfiles);
+    const remaining = profiles.filter(item => item.id !== profile.id);
+    const secretStillReferenced = Boolean(profile.secretId)
+        && remaining.some(item => item.secretId === profile.secretId);
+    const keyNotice = secretStillReferenced
+        ? '该 Key 仍被其他副 API 配置引用，因此只会删除本配置。'
+        : '若该 Key 不是酒馆当前活动 Custom Key，会在配置落盘确认后删除；活动 Key 会保留以避免影响其他连接。';
+    if (!confirm(`确定删除副 API 配置“${profile.name}”吗？\n\n${keyNotice}`)) return;
+
+    plannerDirectSaveLocked = true;
+    updatePlannerDirectCapabilityUi();
+    const previousProfiles = settings.plannerDirectProfiles;
+    const previousSelectedId = settings.plannerDirectProfileId;
+    const previousMode = settings.plannerConnectionMode;
+    let hostSendLock = null;
+    let deleteCommitVerified = false;
+    try {
+        hostSendLock = acquirePlannerDirectHostSendLock();
+        if (!hostSendLock) {
+            throw new Error('发送状态已改变，未开始副 API 配置删除事务；请结束当前生成后重试');
+        }
+        hostSendLock.assertSafe();
+        await flushPendingSettingsBeforePlannerDirectMutation(settings);
+        hostSendLock.assertSafe();
+        settings.plannerDirectProfiles = remaining.map(item => ({ ...item }));
+        settings.plannerDirectProfileId = remaining[0]?.id || '';
+        if (!remaining.length && settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.DIRECT) {
+            settings.plannerConnectionMode = PLANNER_CONNECTION_MODES.CURRENT;
+        }
+        normalizeSettings(settings);
+        hostSendLock.assertSafe();
+
+        const persistence = await saveAndVerifyPlannerDirectSettings(settings);
+        if (persistence.status !== 'verified') {
+            settings.plannerDirectProfiles = previousProfiles;
+            settings.plannerDirectProfileId = previousSelectedId;
+            settings.plannerConnectionMode = previousMode;
+            normalizeSettings(settings);
+            const reason = persistence.status === 'mismatch'
+                ? '酒馆未把删除结果写入设置文件'
+                : `无法确认删除结果：${persistence.error?.message || persistence.error || '设置回读失败'}`;
+            throw new Error(`${reason}；服务端 Key 未删除`);
+        }
+        deleteCommitVerified = true;
+
+        let cleanupWarning = '';
+        if (profile.secretId && !secretStillReferenced) {
+            try {
+                const persisted = await readPersistedPlannerSettingsEnvelopeStrict();
+                const state = await readPlannerCustomSecretStateStrict();
+                const decision = authorizePlannerDirectSecretCleanup({
+                    profiles: persisted.direct.profiles,
+                    secretState: state,
+                    secretId: profile.secretId,
+                    connectionProfileSecretReferences: persisted.connectionProfileSecretReferences,
+                });
+                if (decision.safe) {
+                    hostSendLock.assertSafe();
+                    await deletePlannerCustomSecretVerified(profile.secretId);
+                } else {
+                    cleanupWarning = getPlannerDirectCleanupWarning(decision.reason, '对应 Key');
+                }
+            } catch (error) {
+                cleanupWarning = String(error.message || error);
+            }
+        }
+        invalidateRun('Direct planner profile deleted', { clearCaches: true });
+        refreshPlannerDirectProfilesUi();
+        $('#hwr_planner_connection_mode').val(settings.plannerConnectionMode);
+        updatePlannerConnectionUi();
+        if (cleanupWarning) {
+            setPlannerDirectStatus('saved', `配置已删除；${cleanupWarning}`);
+            toastr.warning('配置已删除，但 Key 为避免影响其他连接而保留或无法确认清理；请检查酒馆密钥管理器。', DISPLAY_NAME);
+        } else {
+            toastr.success(`副 API 配置“${profile.name}”已删除`, DISPLAY_NAME);
+        }
+    } catch (error) {
+        if (!deleteCommitVerified) {
+            settings.plannerDirectProfiles = previousProfiles;
+            settings.plannerDirectProfileId = previousSelectedId;
+            settings.plannerConnectionMode = previousMode;
+            normalizeSettings(settings);
+        }
+        refreshPlannerDirectProfilesUi();
+        $('#hwr_planner_connection_mode').val(settings.plannerConnectionMode);
+        updatePlannerConnectionUi();
+        toastr.error(String(error.message || error), '删除副 API 配置失败');
+    } finally {
+        plannerDirectSaveLocked = false;
+        updatePlannerDirectCapabilityUi();
+        hostSendLock?.release({ allowActivate: true });
+        hostSendLock = null;
+    }
+}
+async function fetchPlannerDirectModels() {
+    if (plannerDirectModelListLocked) return;
+    if (plannerDirectSaveLocked || plannerDirectTestLocked) {
+        toastr.warning('副 API 配置正在保存或测试，请稍后再拉取模型列表');
+        return;
+    }
+    if (!isPlannerDirectConnectionSupported()) {
+        toastr.warning('拉取模型列表需要 SillyTavern 1.18.0 或更高版本', DISPLAY_NAME);
+        return;
+    }
+    if (activeRunEpoch !== null) {
+        toastr.warning('隐藏研究正在运行，请等待本轮结束后再拉取模型列表');
+        return;
+    }
+    const settings = getSettings();
+    const profile = getSelectedPlannerDirectProfile(settings);
+    if (!profile) {
+        toastr.warning('请先保存并选择一个带有效 Key 的副 API 配置');
+        return;
+    }
+    let formUrl;
+    try {
+        formUrl = normalizePlannerDirectApiUrl($('#hwr_planner_direct_url').val());
+    } catch (error) {
+        toastr.warning(String(error.message || error), DISPLAY_NAME);
+        return;
+    }
+    if (formUrl !== profile.apiUrl) {
+        toastr.warning('URL 有未保存修改，请先保存配置再拉取模型列表');
+        return;
+    }
+    plannerDirectModelListLocked = true;
+    const button = $('#hwr_fetch_planner_direct_models').prop('disabled', true).attr('aria-busy', 'true');
+    setPlannerDirectModelListStatus('loading', '正在从已保存端点拉取模型列表…');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), Math.min(30000, settings.requestTimeoutMs));
+    try {
+        const response = await fetch('/api/backends/chat-completions/status', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            cache: 'no-store',
+            signal: controller.signal,
+            body: JSON.stringify({
+                chat_completion_source: 'custom',
+                custom_url: profile.apiUrl,
+                secret_id: profile.secretId,
+            }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || payload?.error) throw new Error(`模型列表接口返回 HTTP ${response.status}`);
+        const rawModels = Array.isArray(payload?.data)
+            ? payload.data
+            : Array.isArray(payload?.data?.data) ? payload.data.data : [];
+        const models = [];
+        const seen = new Set();
+        for (const item of rawModels) {
+            const id = String(item?.id || '').trim();
+            if (!id || id.length > 512 || /[\u0000-\u001f\u007f]/u.test(id) || seen.has(id)) continue;
+            seen.add(id);
+            models.push(id);
+            if (models.length >= 1000) break;
+        }
+        const current = getSelectedPlannerDirectProfile(getSettings());
+        let currentFormUrl = '';
+        try {
+            currentFormUrl = normalizePlannerDirectApiUrl($('#hwr_planner_direct_url').val());
+        } catch {
+            // An invalid or partially edited URL is stale by definition.
+        }
+        if (!current
+            || current.id !== profile.id
+            || current.apiUrl !== profile.apiUrl
+            || current.secretId !== profile.secretId
+            || currentFormUrl !== formUrl) {
+            setPlannerDirectModelListStatus('stale', '配置或表单 URL 已变化，已丢弃这次旧模型列表。');
+            return;
+        }
+        const datalist = $('#hwr_planner_direct_models').get(0);
+        if (datalist) {
+            const fragment = document.createDocumentFragment();
+            for (const id of models) {
+                const option = document.createElement('option');
+                option.value = id;
+                fragment.append(option);
+            }
+            datalist.replaceChildren(fragment);
+        }
+        if (!models.length) {
+            setPlannerDirectModelListStatus('empty', '上游返回空模型列表；可以继续手工填写模型 ID。');
+            return;
+        }
+        setPlannerDirectModelListStatus('ready', `已拉取 ${models.length} 个模型；列表缺项时仍可手工填写。`);
+        toastr.success(`已拉取 ${models.length} 个模型`, DISPLAY_NAME);
+    } catch (error) {
+        const message = error?.name === 'AbortError'
+            ? '拉取模型列表超时；仍可手工填写模型 ID。'
+            : String(error.message || error);
+        setPlannerDirectModelListStatus('error', message);
+        toastr.error(message, '模型列表拉取失败');
+    } finally {
+        clearTimeout(timeoutId);
+        plannerDirectModelListLocked = false;
+        button.prop('disabled', !isPlannerDirectConnectionSupported()).attr('aria-busy', 'false');
+    }
+}
+
+async function testPlannerDirectProfile() {
+    if (plannerDirectTestLocked) return;
+    if (plannerDirectSaveLocked || is_send_press || is_group_generating) {
+        toastr.warning('当前有生成或副 API 保存正在运行，请结束后再测试副规划器');
+        return;
+    }
+    const settings = getSettings();
+    if (!isPlannerDirectConnectionSupported()) {
+        toastr.warning('直连副 API 测试需要完整的 SillyTavern 1.18.0 或更高版本接口', DISPLAY_NAME);
+        return;
+    }
+    const profile = getSelectedPlannerDirectProfile(settings);
+    if (settings.plannerConnectionMode !== PLANNER_CONNECTION_MODES.DIRECT || !profile) {
+        toastr.warning('请先选择直连模式以及一个带有效 Key 的副 API 配置');
+        return;
+    }
+    if (activeRunEpoch !== null) {
+        toastr.warning('隐藏研究正在运行，请等待本轮结束后再测试副规划器');
+        return;
+    }
+    if (!confirm('测试会发送一条不含聊天内容的固定短请求，并消耗一次模型 API 调用。继续吗？')) return;
+
+    const snapshot = Object.freeze({
+        id: profile.id,
+        apiUrl: profile.apiUrl,
+        model: profile.model,
+        secretId: profile.secretId,
+    });
+    plannerDirectTestLocked = true;
+    const button = $('#hwr_test_planner_direct').prop('disabled', true).attr('aria-busy', 'true');
+    updateStatus('planning', '正在测试直连副规划器…');
+    const controller = new AbortController();
+    plannerDirectTestAbortController = controller;
+    const timeoutId = setTimeout(() => controller.abort(PLANNER_REQUEST_TIMEOUT_REASON), settings.requestTimeoutMs);
+    try {
+        const result = await requestHiddenPlanner({
+            mode: PLANNER_CONNECTION_MODES.DIRECT,
+            profileId: snapshot.id,
+            fallbackToCurrent: false,
+            messages: [
+                { role: 'system', content: 'Return a compact JSON object only. Do not call tools or search the web.' },
+                { role: 'user', content: 'Return exactly {"status":"ok"}.' },
+            ],
+            maxTokens: Math.max(128, Math.min(256, settings.plannerMaxTokens)),
+            signal: controller.signal,
+            overridePayload: getPlannerProfileOverridePayload(),
+            service: getPlannerDirectService(settings),
+            generateCurrent: async () => {
+                throw new Error('Direct planner test must not use the current answer model');
+            },
+        });
+        const currentSettings = getSettings();
+        const current = getSelectedPlannerDirectProfile(currentSettings);
+        const stale = currentSettings.plannerConnectionMode !== PLANNER_CONNECTION_MODES.DIRECT
+            || !current
+            || current.id !== snapshot.id
+            || current.apiUrl !== snapshot.apiUrl
+            || current.model !== snapshot.model
+            || current.secretId !== snapshot.secretId;
+        if (stale) {
+            updateStatus('idle', '副 API 配置已变化，已丢弃旧测试结果');
+            return;
+        }
+        updateStatus('ready', '直连副规划器正常；最终正文连接未切换');
+        toastr.success(`收到 ${result.text.length} 个字符的规划回复`, '直连副规划器测试成功');
+    } catch (error) {
+        const cancelled = error?.name === 'AbortError'
+            && controller.signal.reason !== PLANNER_REQUEST_TIMEOUT_REASON;
+        if (cancelled) {
+            updateStatus('idle', '副规划器测试已取消，旧结果不会应用');
+        } else {
+            updateStatus('error', `直连副规划器测试失败：${error.message || error}`);
+            toastr.error(String(error.message || error), '直连副规划器测试失败');
+        }
+    } finally {
+        clearTimeout(timeoutId);
+        if (plannerDirectTestAbortController === controller) {
+            plannerDirectTestAbortController = null;
+        }
+        plannerDirectTestLocked = false;
+        button.prop('disabled', !isPlannerDirectConnectionSupported()).attr('aria-busy', 'false');
+    }
+}
 function getPlannerProfileDisplayLabel(profile) {
     const context = SillyTavern.getContext();
     const mapping = context.CONNECT_API_MAP?.[profile?.api] || {};
@@ -3245,23 +4650,43 @@ function getPlannerProfileDisplayLabel(profile) {
 function updatePlannerConnectionUi(profiles = null) {
     const settings = getSettings();
     const profileMode = settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.PROFILE;
+    const directMode = settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.DIRECT;
     $('#hwr_planner_profile_panel').toggle(profileMode);
-    const availableProfiles = profiles || getPlannerProfileService()?.getSupportedProfiles() || [];
-    const selected = availableProfiles.find(profile => profile.id === settings.plannerProfileId);
+    $('#hwr_planner_direct_panel').toggle(directMode);
+    updatePlannerDirectCapabilityUi();
     const { source, model } = getCurrentModelInfo();
     const mainLabel = `${source}${model ? ` / ${model}` : ''}`;
-    if (!profileMode) {
+    const fallback = settings.plannerFallbackToCurrent
+        ? '请求时将回退当前回答模型'
+        : '请求时会报错并使用现有本地门控兜底';
+    if (!profileMode && !directMode) {
         $('#hwr_resolved_planner_connection').text(`规划执行：当前回答模型（${mainLabel}）；最终正文：同一当前模型`);
         return;
     }
-    if (selected) {
+    if (profileMode) {
+        const availableProfiles = profiles || getPlannerProfileService()?.getSupportedProfiles() || [];
+        const selected = availableProfiles.find(profile => profile.id === settings.plannerProfileId);
+        if (selected) {
+            $('#hwr_resolved_planner_connection').text(
+                `规划执行：${getPlannerProfileDisplayLabel(selected)}；最终正文：当前回答模型（${mainLabel}）`,
+            );
+            return;
+        }
+        $('#hwr_resolved_planner_connection').text(`尚未选择可用副规划 Profile；${fallback}`);
+        return;
+    }
+    if (!isPlannerDirectConnectionSupported()) {
+        $('#hwr_resolved_planner_connection').text(`${getPlannerDirectUnavailableReason()} 实际请求已强制改用当前回答模型（${mainLabel}）。`);
+        return;
+    }
+    const selected = getPlannerDirectProfileMetadata(settings);
+    if (selected && plannerDirectSecretExists(selected.secretId)) {
         $('#hwr_resolved_planner_connection').text(
-            `规划执行：${getPlannerProfileDisplayLabel(selected)}；最终正文：当前回答模型（${mainLabel}）`,
+            `规划执行：${getPlannerDirectDisplayLabel(selected)}；最终正文：当前回答模型（${mainLabel}）`,
         );
         return;
     }
-    const fallback = settings.plannerFallbackToCurrent ? '请求时将回退当前回答模型' : '请求时会报错并使用现有本地门控兜底';
-    $('#hwr_resolved_planner_connection').text(`尚未选择可用副规划 Profile；${fallback}`);
+    $('#hwr_resolved_planner_connection').text(`尚未选择带有效 Key 的直连副 API 配置；${fallback}`);
 }
 
 function refreshPlannerProfiles() {
@@ -3415,8 +4840,13 @@ function bindSettingsUi() {
         saveSettingsDebounced();
     });
     $('#hwr_planner_connection_mode').val(settings.plannerConnectionMode).on('change', function () {
+        if (plannerDirectSaveLocked) {
+            $(this).val(settings.plannerConnectionMode);
+            return;
+        }
         settings.plannerConnectionMode = normalizePlannerConnectionMode($(this).val());
         $(this).val(settings.plannerConnectionMode);
+        $('#hwr_planner_direct_key').val('');
         invalidateRun('Planner connection mode changed', { clearCaches: true });
         updatePlannerConnectionUi();
         saveSettingsDebounced();
@@ -3427,6 +4857,55 @@ function bindSettingsUi() {
         updatePlannerConnectionUi();
         saveSettingsDebounced();
     });
+    $('#hwr_planner_direct_connection').on('change', function () {
+        if (plannerDirectSaveLocked) {
+            $(this).val(settings.plannerDirectProfileId);
+            return;
+        }
+        if (activeRunEpoch !== null) {
+            $(this).val(settings.plannerDirectProfileId);
+            toastr.warning('隐藏研究正在运行，请等待本轮结束后再切换副 API 配置');
+            return;
+        }
+        settings.plannerDirectProfileId = String($(this).val() || '');
+        const selected = getPlannerDirectProfileMetadata(settings);
+        populatePlannerDirectForm(selected);
+        invalidateRun('Direct planner profile changed', { clearCaches: true });
+        updatePlannerConnectionUi();
+        saveSettingsDebounced();
+    });
+    $('#hwr_new_planner_direct').on('click', () => {
+        if (plannerDirectSaveLocked) return;
+        if (activeRunEpoch !== null) {
+            toastr.warning('隐藏研究正在运行，请等待本轮结束后再新建副 API 配置');
+            return;
+        }
+        settings.plannerDirectProfileId = '';
+        $('#hwr_planner_direct_connection').val('');
+        populatePlannerDirectForm(null);
+        invalidateRun('New direct planner profile selected', { clearCaches: true });
+        updatePlannerConnectionUi();
+        saveSettingsDebounced();
+    });
+    const markPlannerDirectFormDirty = () => {
+        const hasNewKey = Boolean(String($('#hwr_planner_direct_key').val() || '').trim());
+        setPlannerDirectStatus(
+            'dirty',
+            hasNewKey
+                ? '有未保存的 Key；保存后不会回显。'
+                : '有未保存修改；Key 留空会保留现有值，URL 改变时除外。',
+        );
+    };
+    $('#hwr_planner_direct_name, #hwr_planner_direct_model').on('input', markPlannerDirectFormDirty);
+    $('#hwr_planner_direct_url').on('input', () => {
+        markPlannerDirectFormDirty();
+        clearPlannerDirectModelList('URL 已修改；请先保存配置，再重新拉取模型列表。');
+    });
+    $('#hwr_planner_direct_key').on('input', markPlannerDirectFormDirty);
+    $('#hwr_save_planner_direct').on('click', savePlannerDirectProfile);
+    $('#hwr_delete_planner_direct').on('click', deletePlannerDirectProfile);
+    $('#hwr_fetch_planner_direct_models').on('click', fetchPlannerDirectModels);
+    $('#hwr_test_planner_direct').on('click', testPlannerDirectProfile);
     $('#hwr_planner_fallback_current').prop('checked', settings.plannerFallbackToCurrent).on('change', function () {
         settings.plannerFallbackToCurrent = Boolean($(this).prop('checked'));
         invalidateRun('Planner fallback policy changed', { clearCaches: true });
@@ -3606,6 +5085,7 @@ function bindSettingsUi() {
     }
     updateSearchApiCredentialStatus('serpapi');
     refreshPlannerProfiles();
+    refreshPlannerDirectProfilesUi();
     updateResolvedAdapterLabel();
     updateResolvedTransportLabel();
     switchBackendUi();
@@ -3623,7 +5103,18 @@ function bindSettingsUi() {
 globalThis.HiddenWebResearch_Intercept = hiddenWebResearchInterceptor;
 
 if (CLIENT_COMPATIBILITY.supported) {
+    // Register passively at startup as well as reordering at transaction start:
+    // an event already waiting in another async listener keeps this callback in
+    // its snapshot and will observe a credential guard opened in the meantime.
+    eventSource.makeFirst(
+        event_types.CHAT_COMPLETION_SETTINGS_READY,
+        capturePlannerDirectCredentialWindowRequest,
+    );
     eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, handleChatCompletionSettingsReady);
+    eventSource.makeLast(
+        event_types.CHAT_COMPLETION_SETTINGS_READY,
+        enforcePlannerDirectCredentialWindowRequest,
+    );
     eventSource.on(event_types.GENERATION_ENDED, () => {
         invalidateRun('Generation ended');
     });
