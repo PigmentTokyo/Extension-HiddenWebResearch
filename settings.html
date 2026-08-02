@@ -6,7 +6,7 @@
         </div>
         <div class="inline-drawer-content">
             <div class="hwr_intro">
-                兼容 SillyTavern 1.13.3 及以上版本。自动判断是否搜索；当前公开版仅使用原版 SillyTavern 自带的 SearXNG 与 SerpAPI 路由。搜索结果可作为本轮临时工具结果或隐藏研究包进入模型，两种方式都不会生成聊天楼层、附件或 Data Bank 文件。
+                兼容 SillyTavern 1.13.3 及以上版本（已验证 1.13.3–1.18.x）。自动判断是否搜索；支持 SearXNG、SerpAPI、Tavily、Serper、KoboldCpp，以及可选的 Extras API / Selenium Plugin。搜索结果只在本轮请求中临时进入模型，不会生成聊天楼层、附件或 Data Bank 文件。
             </div>
 
             <label class="checkbox_label" for="hwr_enabled">
@@ -18,12 +18,20 @@
             <select id="hwr_research_backend" class="text_pole">
                 <option value="searxng">本机 SearXNG（适用于所有模型，推荐）</option>
                 <option value="serpapi">SerpAPI Google（适用于所有模型）</option>
+                <option value="tavily">Tavily AI Search（共享 Key）</option>
+                <option value="serper">Serper Google Search（共享 Key）</option>
+                <option value="koboldcpp">KoboldCpp WebSearch（继承当前连接 URL）</option>
+                <option value="extras">Extras API（已废弃，仅聚合结果）</option>
+                <option value="selenium">Selenium Plugin（需 server plugin，仅聚合结果）</option>
                 <!-- Paused: these modes require non-stock server routes or response passthrough.
                 <option value="anysearch">AnySearch（anysearch.com，适用于所有模型）</option>
                 <option value="claude_profile">Claude 原生搜索桥接（Profile 或 URL + Key）</option>
                 <option value="gemini_profile">Gemini 原生搜索直答（Profile 或 URL + Key）</option>
                 -->
             </select>
+            <div class="hwr_hint">
+                本扩展不提供 Z.AI 搜索来源。Extras API 与 Selenium Plugin 是可选兼容路径，不影响其他来源独立使用。
+            </div>
 
             <div id="hwr_adapter_block">
                 <label for="hwr_adapter">当前回答模型的查询规划与最终回答策略</label>
@@ -164,7 +172,7 @@
                 </label>
                 <div id="hwr_resolved_planner_connection" class="hwr_hint"></div>
                 <div class="hwr_notice">
-                    副 API 只执行隐藏的 SEARCH / DONE 判断、查询词规划、补搜和资料充分性评估；真正的网页搜索仍由已配置的 SearXNG 或 SerpAPI 完成，最终正文始终使用当前回答模型。副 API 会收到本轮用户请求、设置范围内的最近聊天以及已取得的搜索摘要。每次规划仍是独立模型调用，只是费用和负载转移到所选副 API。
+                    副 API 只执行隐藏的 SEARCH / DONE 判断、查询词规划、补搜和资料充分性评估；真正的网页搜索仍由上方选择的搜索来源完成，最终正文始终使用当前回答模型。副 API 会收到本轮用户请求、设置范围内的最近聊天以及已取得的搜索摘要。每次规划仍是独立模型调用，只是费用和负载转移到所选副 API。
                     Connection Profile 模式只保存 Profile ID，直连模式只保存非敏感连接元数据和服务端 secret ID；两种方式都不会切换当前回答的来源、Profile、URL 或模型。直连首次写入空 Custom 密钥槽时会改变全局活动 Custom credential，详见上方警告。插件不向副 API 提交搜索工具，同时显式关闭 SillyTavern 的原生联网开关；如果模型名称（例如 <code>:online</code>）、模型本身或中转网关强制联网，前端插件无法禁止，可能另行产生搜索费用。
                     只应使用可信的 Profile 和 HTTPS 端点。扩展无法替你审计中转服务器；Connection Manager、Proxy Preset 与同源第三方扩展属于同一前端信任域。
                 </div>
@@ -186,6 +194,7 @@
                 若函数调用关闭、消息协议不兼容或无法安全定位本轮研究内容，会保留隐藏研究包。
                 SillyTavern 1.13.3–1.14.x 尚不能对 Gemini 最终综合请求可靠强制“禁止再次调用工具”，因此这些版本的 Gemini 会自动使用隐藏研究包；1.15.0 及以上仅对 Gemini 3 保守回退。
                 Claude、DeepSeek 与其他兼容来源仍可在支持函数调用时使用隐藏工具结果。
+                Extras API 与 Selenium Plugin 只返回无法逐条归因的聚合内容，因此无论这里选择哪一项，都强制使用中性聚合研究包。
             </div>
             <div class="hwr_hint">
                 自动兼容回退发生在请求发送前；若某个中转错误宣称支持工具、但上游发送后才返回协议错误，前端扩展无法在同一轮透明重发。
@@ -310,6 +319,103 @@
                         <span>测试 SerpAPI（会消耗一次搜索）</span>
                     </button>
                 </div>
+            </div>
+
+            <div id="hwr_tavily_settings" class="hwr_backend_box">
+                <h4>Tavily AI Search</h4>
+                <div class="hwr_notice">
+                    复用原版 SillyTavern 的 Tavily 搜索路由与当前用户的共享密钥槽。这里保存或删除 Key 也会影响酒馆 WebSearch 等其他使用者。P1G搜只采用带有效 HTTP(S) URL 的搜索结果，不请求图片，也不会把 Tavily 顶层 answer 当成可独立引用的证据。
+                </div>
+                <label for="hwr_tavily_key">Tavily Key</label>
+                <input id="hwr_tavily_key" class="text_pole" type="password" autocomplete="new-password" spellcheck="false">
+                <div id="hwr_tavily_status" class="hwr_credential_status" role="status" aria-live="polite"></div>
+                <div class="hwr_button_row">
+                    <button id="hwr_save_tavily_key" class="menu_button" type="button">
+                        <i class="fa-solid fa-floppy-disk"></i>
+                        <span>保存共享 Tavily Key</span>
+                    </button>
+                    <button id="hwr_clear_tavily_key" class="menu_button" type="button">
+                        <i class="fa-solid fa-key"></i>
+                        <span>删除当前共享 Key</span>
+                    </button>
+                    <button id="hwr_test_tavily" class="menu_button" type="button">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <span>测试 Tavily（会消耗一次搜索）</span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="hwr_serper_settings" class="hwr_backend_box">
+                <h4>Serper Google Search</h4>
+                <div class="hwr_notice">
+                    复用原版 SillyTavern 的 Serper 搜索路由与当前用户的共享密钥槽。这里保存或删除 Key 也会影响酒馆 WebSearch 等其他使用者；每条规划查询只请求一页，并只采用带有效 HTTP(S) URL 的结果。
+                </div>
+                <label for="hwr_serper_key">Serper Key</label>
+                <input id="hwr_serper_key" class="text_pole" type="password" autocomplete="new-password" spellcheck="false">
+                <div id="hwr_serper_status" class="hwr_credential_status" role="status" aria-live="polite"></div>
+                <div class="hwr_button_row">
+                    <button id="hwr_save_serper_key" class="menu_button" type="button">
+                        <i class="fa-solid fa-floppy-disk"></i>
+                        <span>保存共享 Serper Key</span>
+                    </button>
+                    <button id="hwr_clear_serper_key" class="menu_button" type="button">
+                        <i class="fa-solid fa-key"></i>
+                        <span>删除当前共享 Key</span>
+                    </button>
+                    <button id="hwr_test_serper" class="menu_button" type="button">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <span>测试 Serper（会消耗一次搜索）</span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="hwr_koboldcpp_settings" class="hwr_backend_box">
+                <h4>KoboldCpp WebSearch</h4>
+                <div class="hwr_notice">
+                    不另存 URL 或 Key，直接继承 SillyTavern 当前 Text Completion → KoboldCpp 的服务器 URL。需要 KoboldCpp 1.81.1 或更新版本，并以 <code>--websearch</code> 启动；网页检索由该 KoboldCpp 实例完成，主模型仍按当前酒馆连接回答。
+                </div>
+                <button id="hwr_test_koboldcpp" class="menu_button hwr_button" type="button">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <span>测试 KoboldCpp WebSearch（不调用模型）</span>
+                </button>
+            </div>
+
+            <div id="hwr_extras_settings" class="hwr_backend_box">
+                <h4>Extras API（已废弃）</h4>
+                <div class="hwr_notice hwr_warning">
+                    SillyTavern Extras 已停止维护；这里只保留与既有安装的兼容。必须先在酒馆配置可用的 Extras API，并启用其 <code>websearch</code> 模块。新安装建议优先使用 SearXNG、Tavily、Serper 或其他受支持来源。
+                </div>
+                <label for="hwr_extras_engine">搜索引擎</label>
+                <select id="hwr_extras_engine" class="text_pole">
+                    <option value="google">Google</option>
+                    <option value="duckduckgo">DuckDuckGo</option>
+                </select>
+                <div class="hwr_notice hwr_warning">
+                    Extras 返回聚合正文与候选链接，无法可靠证明每一条事实对应哪一个 URL。选择此来源时，P1G搜强制使用中性聚合研究包，不构造隐藏工具结果；候选链接只供模型核对方向，模型不得伪造逐条引用或宣称它们分别支持某项事实。
+                </div>
+                <button id="hwr_test_extras" class="menu_button hwr_button" type="button">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <span>测试 Extras API（会执行一次搜索）</span>
+                </button>
+            </div>
+
+            <div id="hwr_selenium_settings" class="hwr_backend_box">
+                <h4>Selenium Plugin</h4>
+                <div class="hwr_notice hwr_warning">
+                    此来源不是纯前端能力：必须在 SillyTavern 服务器安装并启用 WebSearch Selenium server plugin。其他搜索来源不依赖该插件，也不需要修改酒馆核心文件。
+                </div>
+                <label for="hwr_selenium_engine">搜索引擎</label>
+                <select id="hwr_selenium_engine" class="text_pole">
+                    <option value="google">Google</option>
+                    <option value="duckduckgo">DuckDuckGo</option>
+                </select>
+                <div class="hwr_notice hwr_warning">
+                    Selenium Plugin 返回聚合正文与候选链接，无法可靠证明每一条事实对应哪一个 URL。选择此来源时，P1G搜强制使用中性聚合研究包，不构造隐藏工具结果；候选链接只供模型核对方向，模型不得伪造逐条引用或宣称它们分别支持某项事实。
+                </div>
+                <button id="hwr_test_selenium" class="menu_button hwr_button" type="button">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <span>测试 Selenium Plugin（会执行一次搜索）</span>
+                </button>
             </div>
 
             <!-- Paused server-dependent UI: native Claude/Gemini modes are kept for future work.
@@ -457,7 +563,7 @@
 
             <label id="hwr_source_links_label" class="checkbox_label" for="hwr_include_source_links">
                 <input type="checkbox" id="hwr_include_source_links">
-                <span>保留真实来源 URL，并要求最终回答使用 Markdown 引用</span>
+                <span>对可逐条归因的结果保留真实 URL，并要求最终回答使用 Markdown 引用</span>
             </label>
 
             <details class="hwr_advanced">
@@ -497,7 +603,7 @@
                     <input id="hwr_reuse_seconds" class="text_pole" type="number" min="0" max="3600" step="60">
                 </div>
                 <div class="hwr_hint">
-                    复用时间适用于当前启用的 SearXNG 与基础 SerpAPI 隐藏研究。
+                    复用时间适用于当前选择的搜索来源；缓存只保存在本页内存中，并按来源及其非敏感配置隔离。
                 </div>
                 <div class="hwr_hint">
                     “规划器 tokens”是通用下限；模型专属提示策略会覆盖较小值：DeepSeek V4 Pro 1024、GLM 5.2 1536、Kimi K3 2048。私有 hwr_planner_profile 服务端标记当前暂停；普通请求参数是否生效由原版酒馆和上游决定。
@@ -526,7 +632,7 @@
             </div>
 
             <div class="hwr_privacy">
-                隐私说明：SearXNG/SerpAPI 研究内容不写入聊天文件、附件、Data Bank、LocalStorage 或 IndexedDB，但搜索词会发送给所选搜索服务，证据会临时进入最终回答模型的请求上下文。若选择 Connection Profile 或自行保存的直连副 API，本轮用户请求、设置范围内的最近聊天以及搜索摘要也会发送给所选副规划服务。直连规划 Key 与 SerpAPI Key 使用当前 SillyTavern 用户的服务端 secrets，不写入扩展设置或聊天；直连配置只在扩展设置中保存名称、URL、模型和 secret ID。本扩展自身的调试日志不打印搜索正文；原版酒馆服务端可能按其自身日志策略记录搜索查询和副规划请求。
+                隐私说明：所有来源的研究内容都不会写入聊天文件、附件、Data Bank、LocalStorage 或 IndexedDB，但搜索词会发送给所选服务；KoboldCpp、Extras API 与 Selenium Plugin 会发往你配置的对应实例或组件，证据会临时进入最终回答模型的请求上下文。SerpAPI、Tavily 与 Serper Key 使用当前 SillyTavern 用户的共享服务端 secrets，直连规划 Key 使用 Custom 服务端 secrets，均不写入扩展设置或聊天。若选择 Connection Profile 或直连副 API，本轮用户请求、设置范围内的最近聊天及搜索摘要还会发送给该规划服务。Extras/Selenium 的候选链接不具备逐条事实归因能力。本扩展调试日志不打印搜索正文；原版酒馆及可选组件仍可能按各自日志策略记录请求。
             </div>
         </div>
     </div>

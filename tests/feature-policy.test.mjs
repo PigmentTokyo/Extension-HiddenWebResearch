@@ -6,6 +6,7 @@ import {
     getEnabledResearchBackends,
     isResearchBackendEnabled,
     normalizeResearchBackend,
+    OPTIONAL_COMPONENT_RESEARCH_BACKENDS,
     resolveResearchBackendSelection,
     SERVER_DEPENDENT_RESEARCH_BACKENDS,
     STOCK_RESEARCH_BACKENDS,
@@ -21,14 +22,30 @@ for (const request of ['不要联网搜索，只根据我提供的内容回答',
     assert.equal(hasExplicitNoSearchIntent(request), true);
     assert.equal(hasExplicitSearchIntent(request), false);
 }
-assert.deepEqual(STOCK_RESEARCH_BACKENDS, ['searxng', 'serpapi']);
+assert.deepEqual(STOCK_RESEARCH_BACKENDS, [
+    'searxng',
+    'serpapi',
+    'tavily',
+    'serper',
+    'koboldcpp',
+]);
+assert.deepEqual(OPTIONAL_COMPONENT_RESEARCH_BACKENDS, ['extras', 'selenium']);
 assert.deepEqual(
     SERVER_DEPENDENT_RESEARCH_BACKENDS,
     ['anysearch', 'claude_profile', 'gemini_profile'],
 );
-assert.deepEqual(getEnabledResearchBackends(), ['searxng', 'serpapi']);
+const publicBackends = [
+    'searxng',
+    'serpapi',
+    'tavily',
+    'serper',
+    'koboldcpp',
+    'extras',
+    'selenium',
+];
+assert.deepEqual(getEnabledResearchBackends(), publicBackends);
 
-for (const backend of STOCK_RESEARCH_BACKENDS) {
+for (const backend of publicBackends) {
     assert.equal(isResearchBackendEnabled(backend), true);
     assert.equal(normalizeResearchBackend(backend), backend);
     assert.deepEqual(resolveResearchBackendSelection(backend, true), {
@@ -38,10 +55,10 @@ for (const backend of STOCK_RESEARCH_BACKENDS) {
         paused: false,
     });
 }
-for (const backend of [...SERVER_DEPENDENT_RESEARCH_BACKENDS, 'unknown', '', null]) {
+for (const backend of [...SERVER_DEPENDENT_RESEARCH_BACKENDS, 'zai', 'unknown', '', null]) {
     assert.equal(normalizeResearchBackend(backend), 'searxng');
 }
-for (const backend of SERVER_DEPENDENT_RESEARCH_BACKENDS) {
+for (const backend of [...SERVER_DEPENDENT_RESEARCH_BACKENDS, 'zai', 'unknown']) {
     assert.equal(isResearchBackendEnabled(backend), false);
     assert.deepEqual(resolveResearchBackendSelection(backend, true), {
         requestedBackend: backend,
@@ -50,10 +67,22 @@ for (const backend of SERVER_DEPENDENT_RESEARCH_BACKENDS) {
         paused: true,
     });
 }
-assert.deepEqual(resolveResearchBackendSelection('unknown', true), {
-    requestedBackend: 'unknown',
+for (const backend of ['', null]) {
+    assert.deepEqual(resolveResearchBackendSelection(backend, true), {
+        requestedBackend: '',
+        researchBackend: 'searxng',
+        enabled: true,
+        paused: false,
+    });
+}
+assert.equal(getEnabledResearchBackends().includes('zai'), false);
+assert.equal(STOCK_RESEARCH_BACKENDS.includes('zai'), false);
+assert.equal(OPTIONAL_COMPONENT_RESEARCH_BACKENDS.includes('zai'), false);
+assert.equal(SERVER_DEPENDENT_RESEARCH_BACKENDS.includes('zai'), false);
+assert.deepEqual(resolveResearchBackendSelection('', false), {
+    requestedBackend: '',
     researchBackend: 'searxng',
-    enabled: true,
+    enabled: false,
     paused: false,
 });
 
@@ -66,7 +95,7 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.10.0');
+assert.equal(manifest.version, '1.11.0');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -77,7 +106,7 @@ assert.match(indexSource, /const SETTINGS_KEY = 'hiddenWebResearch'/u);
 assert.match(indexSource, /const PROMPT_KEY = '___HiddenWebResearch___'/u);
 assert.match(readme, /^# P1G搜（颜料搜） for SillyTavern$/mu);
 assert.match(readme, /https:\/\/github\.com\/PigmentTokyo\/Extension-HiddenWebResearch/u);
-assert.match(indexSource, /schemaVersion:\s*11/u);
+assert.match(indexSource, /schemaVersion:\s*12/u);
 assert.match(indexSource, /strategyCustomPromptEnabled:\s*false/u);
 assert.match(indexSource, /strategyCustomPrompt:\s*''/u);
 assert.match(indexSource, /triggerCustomPromptEnabled:\s*false/u);
@@ -111,6 +140,84 @@ assert.doesNotMatch(answerCustomizationSource, /triggerCustomPrompt/u);
 assert.match(indexSource, /\$\{answerCustomization\}/u);
 assert.match(indexSource, /body:\s*JSON\.stringify\(\{ query \}\)/u);
 assert.match(indexSource, /if \(!isResearchBackendEnabled\(settings\.researchBackend\)/u);
+
+for (const [backend, functionName] of Object.entries({
+    tavily: 'searchTavily',
+    serper: 'searchSerper',
+    koboldcpp: 'searchKoboldCpp',
+    extras: 'searchExtras',
+    selenium: 'searchSelenium',
+})) {
+    assert.match(
+        indexSource,
+        new RegExp(`settings\\.researchBackend === '${backend}'\\) return ${functionName}\\(query, settings\\)`, 'u'),
+    );
+}
+assert.match(indexSource, /fetch\('\/api\/search\/tavily'/u);
+assert.match(indexSource, /fetch\('\/api\/search\/serper'/u);
+assert.match(indexSource, /fetch\('\/api\/search\/koboldcpp'/u);
+assert.match(indexSource, /url\.pathname = '\/api\/websearch'/u);
+assert.match(indexSource, /doExtrasFetch\(url,/u);
+assert.match(indexSource, /fetch\('\/api\/plugins\/selenium\/probe'/u);
+assert.match(indexSource, /fetch\('\/api\/plugins\/selenium\/search'/u);
+assert.match(
+    indexSource,
+    /textgenerationwebui_settings\?\.server_urls\?\.\[textgen_types\.KOBOLDCPP\]/u,
+);
+assert.match(indexSource, /body:\s*JSON\.stringify\(\{ query, url: baseUrl \}\)/u);
+assert.doesNotMatch(indexSource, /api\.tavily\.com|google\.serper\.dev/iu);
+
+for (const [provider, secretName] of Object.entries({
+    serpapi: 'SERPAPI',
+    tavily: 'TAVILY',
+    serper: 'SERPER',
+})) {
+    assert.match(
+        indexSource,
+        new RegExp(`if \\(provider === '${provider}'\\)[\\s\\S]*?secretKey: SECRET_KEYS\\.${secretName}`, 'u'),
+    );
+}
+assert.match(indexSource, /function getSharedSearchApiConfig\(provider\)/u);
+assert.match(indexSource, /getActiveSearchApiSecret\(provider\)\?\.id/u);
+assert.match(indexSource, /writeSecret\(\s*definition\.secretKey,/u);
+assert.match(indexSource, /deleteSecret\(definition\.secretKey, record\.id\)/u);
+assert.match(indexSource, /const warning = provider === 'anysearch'/u);
+assert.match(indexSource, /SillyTavern[^`]*\$\{definition\.label\} Key/u);
+assert.match(indexSource, /for \(const provider of \['serpapi', 'tavily', 'serper'\]\)/u);
+
+const legacyBuilderStart = indexSource.indexOf('function buildLegacyAggregateResult');
+const legacySearchStart = indexSource.indexOf('async function searchExtras', legacyBuilderStart);
+const legacyBuilderSource = indexSource.slice(legacyBuilderStart, legacySearchStart);
+assert.ok(legacyBuilderStart >= 0);
+assert.ok(legacySearchStart > legacyBuilderStart);
+assert.match(legacyBuilderSource, /items:\s*\[\]/u);
+assert.match(legacyBuilderSource, /formatted:\s*''/u);
+assert.match(legacyBuilderSource, /aggregateEvidence:/u);
+assert.match(
+    legacyBuilderSource,
+    /candidateLinks:\s*settings\.includeSourceLinks\s*\?\s*normalized\.candidateLinks\s*:\s*\[\]/u,
+);
+assert.doesNotMatch(legacyBuilderSource, /buildUrlBackedSearchResult|formatSearchItems/u);
+assert.match(legacyBuilderSource, /forcePromptTransport:\s*true/u);
+
+const legacyFormatterStart = indexSource.indexOf('function formatLegacyAggregateEvidence');
+const combinedFormatterStart = indexSource.indexOf('function formatCombinedResearchEvidence', legacyFormatterStart);
+const legacyFormatterSource = indexSource.slice(legacyFormatterStart, combinedFormatterStart);
+assert.ok(legacyFormatterStart >= 0);
+assert.ok(combinedFormatterStart > legacyFormatterStart);
+assert.match(legacyFormatterSource, /<candidate_urls>/u);
+assert.match(legacyFormatterSource, /not mapped to individual URLs/u);
+assert.match(legacyFormatterSource, /Never claim that a statement came from a candidate URL/u);
+assert.doesNotMatch(legacyFormatterSource, /<source\s/u);
+assert.match(indexSource, /normalizeLegacyBrowserSearchResponse\(payload, settings\.maxResultsPerQuery\)/u);
+assert.equal((indexSource.match(/normalizeLegacyBrowserSearchResponse\(payload, settings\.maxResultsPerQuery\)/gu) || []).length, 2);
+assert.match(indexSource, /forcePromptTransport \|\|= Boolean\(result\.forcePromptTransport\)/u);
+assert.match(
+    indexSource,
+    /const transport = researchResult\.forcePromptTransport\s*\? 'prompt'\s*:\s*resolveResearchTransport/u,
+);
+assert.match(indexSource, /Aggregate summaries and candidate URL lists are not mapped to each other/u);
+
 assert.deepEqual(
     evaluateNativeResearchGate('Tokyo weather tomorrow', 'auto'),
     { shouldCall: true, reason: 'dynamic_topic' },
@@ -152,6 +259,9 @@ const packetStart = indexSource.indexOf('function buildResearchPacket');
 const packetEnd = indexSource.indexOf('function makeResearchCacheKey', packetStart);
 const packetSource = indexSource.slice(packetStart, packetEnd);
 assert.match(packetSource, /const envelopeName = 'hidden_web_research'/u);
+assert.match(packetSource, /const aggregateCitationRule = \['extras', 'selenium'\]\.includes\(searchBackend\)/u);
+assert.match(packetSource, /Aggregate summaries and candidate URL lists are not mapped to each other/u);
+assert.match(packetSource, /Never attribute a statement to, or cite, a candidate URL/u);
 assert.doesNotMatch(packetSource, /web_search_tool_results|grounding_context/u);
 assert.doesNotMatch(packetSource, /trusted_runtime_clock/u);
 
@@ -249,14 +359,24 @@ assert.ok(structuredStart >= 0);
 assert.ok(hardOptOutGuard > structuredStart);
 assert.ok(plannerStart > hardOptOutGuard);
 
-assert.match(visibleSettingsHtml, /<option value="searxng">/u);
+for (const backend of publicBackends) {
+    assert.match(visibleSettingsHtml, new RegExp(`<option value="${backend}">`, 'u'));
+    assert.match(
+        indexSource,
+        new RegExp(`\\$\\('#hwr_${backend}_settings'\\)\\.toggle\\(backend === '${backend}'\\)`, 'u'),
+    );
+}
+assert.doesNotMatch(visibleSettingsHtml, /<option value="zai">/u);
+assert.match(visibleSettingsHtml, /\u672c\u6269\u5c55\u4e0d\u63d0\u4f9b Z\.AI \u641c\u7d22\u6765\u6e90/u);
+assert.equal((visibleSettingsHtml.match(/\u4e0d\u5f97\u4f2a\u9020\u9010\u6761\u5f15\u7528/gu) || []).length, 2);
+assert.doesNotMatch(indexSource, /\/api\/search\/zai|SECRET_KEYS\.ZAI|researchBackend === 'zai'/iu);
 assert.match(visibleSettingsHtml, /for="hwr_adapter">[^<]+<\/label>/u);
 assert.match(visibleSettingsHtml, /<option value="claude">Claude /u);
 assert.match(visibleSettingsHtml, /<option value="gemini">Gemini /u);
 assert.match(visibleSettingsHtml, /id="hwr_result_transport"/u);
 assert.match(visibleSettingsHtml, /隐藏工具结果优先/u);
 assert.match(visibleSettingsHtml, /固定使用隐藏研究包/u);
-assert.match(visibleSettingsHtml, /兼容 SillyTavern 1\.13\.3 及以上版本/u);
+assert.match(visibleSettingsHtml, /SillyTavern 1\.13\.3.*1\.18\.x/u);
 assert.match(visibleSettingsHtml, /<option value="serpapi">/u);
 for (const id of [
     'hwr_strategy_custom_enabled',
@@ -273,6 +393,40 @@ for (const id of [
 ]) {
     assert.match(visibleSettingsHtml, new RegExp(`id="${id}"`, 'u'));
 }
+for (const id of [
+    'hwr_tavily_settings',
+    'hwr_tavily_key',
+    'hwr_tavily_status',
+    'hwr_save_tavily_key',
+    'hwr_clear_tavily_key',
+    'hwr_test_tavily',
+    'hwr_serper_settings',
+    'hwr_serper_key',
+    'hwr_serper_status',
+    'hwr_save_serper_key',
+    'hwr_clear_serper_key',
+    'hwr_test_serper',
+    'hwr_koboldcpp_settings',
+    'hwr_test_koboldcpp',
+    'hwr_extras_settings',
+    'hwr_extras_engine',
+    'hwr_test_extras',
+    'hwr_selenium_settings',
+    'hwr_selenium_engine',
+    'hwr_test_selenium',
+]) {
+    assert.match(visibleSettingsHtml, new RegExp(`id="${id}"`, 'u'));
+}
+assert.match(indexSource, /\$\(definition\.saveSelector\)\.on\('click', \(\) => saveSearchApiKey\(provider\)\)/u);
+assert.match(indexSource, /#hwr_clear_' \+ provider \+ '_key'\)\.on\('click', \(\) => clearSearchApiKey\(provider\)\)/u);
+for (const backend of ['tavily', 'serper', 'koboldcpp', 'extras', 'selenium']) {
+    assert.match(
+        indexSource,
+        new RegExp(`#hwr_test_${backend}'\\)\\.on\\('click', \\(\\) => testStructuredSearchConnection\\('${backend}'\\)`, 'u'),
+    );
+}
+assert.match(indexSource, /#hwr_extras_engine'\)\.val\(settings\.extrasEngine\)\.on\('change'/u);
+assert.match(indexSource, /#hwr_selenium_engine'\)\.val\(settings\.seleniumEngine\)\.on\('change'/u);
 assert.match(visibleSettingsHtml, /maxlength="4000"/u);
 assert.match(visibleSettingsHtml, /实际每轮与总查询硬上限完全由“高级限制”中的数值决定/u);
 assert.match(visibleSettingsHtml, /DeepSeek[^<]+Claude[^<]+API[^<]+DeepSeek/u);

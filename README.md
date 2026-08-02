@@ -2,14 +2,14 @@
 
 项目的用户可见名称现为 **P1G搜（颜料搜）**。为保证已安装用户能够原地更新，技术仓库名、安装目录和内部兼容 ID 继续保持 `Extension-HiddenWebResearch` / `HiddenWebResearch`。
 
-让没有厂商原生联网能力的主模型也能通过 SearXNG 或 SerpAPI 获取网页搜索摘要，并且不生成工具楼层、空楼层、附件或 Data Bank 文件。
+让没有厂商原生联网能力的主模型也能通过 SearXNG、SerpAPI、Tavily、Serper、KoboldCpp 或可选兼容组件取得网页资料，并且不生成工具楼层、空楼层、附件或 Data Bank 文件。
 
-当前公开版以“可直接安装到原版 SillyTavern”为边界：只开放原版酒馆已经提供的 SearXNG 与基础 SerpAPI 路由，不要求修改核心文件，也不要求安装 server plugin。
+当前公开版不修改 SillyTavern 核心文件。SearXNG、SerpAPI、Tavily、Serper 与 KoboldCpp 直接复用原版酒馆能力，不需要 P1G搜专用 server plugin；只有用户主动选择 Selenium Plugin 时才需要安装对应 server plugin。Extras API 是已废弃组件的兼容路径。**本扩展不支持 Z.AI。**
 
 ## SillyTavern 版本兼容
 
 - 最低支持 SillyTavern `1.13.3`；这是该版本首次同时具备扩展所需的对象式 `generateRaw()`、带生成类型的请求改写事件、多密钥接口和当前搜索路由协议。
-- `1.13.3–1.14.x` 保留 SearXNG、SerpAPI、隐藏规划、时间锚、模型策略、自定义提示词、缓存和无额外楼层等全部公开能力。由于这些版本不能把 `tool_choice: none` 可靠转换给 Gemini，Gemini 会自动走同一份中性隐藏研究包；Claude、DeepSeek 和其他安全来源仍可使用隐藏工具结果。
+- `1.13.3–1.14.x` 保留全部公开搜索来源、隐藏规划、时间锚、模型策略、自定义提示词、缓存和无额外楼层能力。由于这些版本不能把 `tool_choice: none` 可靠转换给 Gemini，Gemini 会自动走同一份中性隐藏研究包；Claude、DeepSeek 和其他安全来源仍可使用隐藏工具结果。
 - `1.15.0` 及以上保持当前双通道行为：安全时优先隐藏工具结果，其他情况自动回退隐藏研究包；Gemini 3 继续保守回退。
 - 指定 Connection Profile 作为副规划 API 的请求能力从 `1.13.3` 起即可使用；但 `1.13.3–1.17.x` 使用对应 SillyTavern Chat Completion 来源当前激活的密钥槽，`1.18.0` 起才能按 Profile 精确绑定独立 `secret-id`。
 - 插件内命名直连副规划器要求 `1.18.0+`：只有这些版本才能把每个 OpenAI-compatible URL / 模型精确绑定到各自的服务端 `secret-id`。旧版继续使用当前回答模型或 Connection Profile，不会退化为全局轮换 Key 或浏览器明文保存。
@@ -21,23 +21,30 @@
 
 - Claude/Gemini 中转、DeepSeek、GLM、Kimi 或其他没有原生联网能力的模型，可以在正式回答前进行隐藏搜索。
 - 可把查询规划、补搜与充分性判断交给当前回答模型，也可指定另一个 Connection Manager Profile 作为便宜的副 API；最终正文始终由当前主模型写作。
-- 在 SillyTavern 1.18.0 及以上，也可直接填写 OpenAI-compatible Base URL、模型和 Key，并把最多 20 组副规划 API 命名保存、随时切换；网页搜索仍由 SearXNG 或 SerpAPI 执行。
-- 当前模型模式继续通过 `generateRaw()` 规划；副 API 模式不会切换当前回答的来源、Profile、URL 或模型，也不要求修改后端或安装 server plugin。直连模式首次写入空 Custom 密钥槽时会改变全局活动 Custom credential，这是原版 secrets 的共享槽例外，详见下方警告。
+- 在 SillyTavern 1.18.0 及以上，也可直接填写 OpenAI-compatible Base URL、模型和 Key，并把最多 20 组副规划 API 命名保存、随时切换；网页搜索仍由用户选择的搜索来源执行。
+- 当前模型模式继续通过 `generateRaw()` 规划；副 API 模式不会切换当前回答的来源、Profile、URL 或模型，也不要求修改后端。直连模式首次写入空 Custom 密钥槽时会改变全局活动 Custom credential，这是原版 secrets 的共享槽例外，详见下方警告。
 - 搜索证据优先在本轮请求发出前转换为客户端工具调用与工具结果；连接不支持安全工具消息时，自动保留为临时 depth-0 `IN_CHAT` 隐藏研究包。
-- 搜索结果标准化为标题、URL、摘要和可选日期；最终回答可使用紧跟事实的真实 Markdown 编号链接。
+- 结构化来源会标准化为标题、URL、摘要和可选日期，最终回答可使用紧跟事实的真实 Markdown 编号链接；Extras/Selenium 仅按聚合资料处理，不做逐条归因。
 - regenerate 和 swipe 可在短时间内复用内存研究结果。
 
 ## 当前支持的联网模式
 
 | 模式 | 原版 SillyTavern | 额外要求 |
 | --- | --- | --- |
-| 本机 SearXNG | 支持 | 一台酒馆服务器能够访问的 SearXNG 实例 |
-| SerpAPI Google Search | 支持 | 当前用户已保存的共享 SerpAPI Key |
-| OpenAI-compatible URL + Key 副规划器 | 1.18.0+ 支持 | 只负责隐藏规划；搜索仍使用上面的 SearXNG / SerpAPI |
+| 本机 SearXNG | 1.13.3+ | 一台酒馆服务器能够访问的可信 SearXNG 实例 |
+| SerpAPI Google Search | 1.13.3+ | 当前用户已保存的共享 SerpAPI Key |
+| Tavily AI Search | 1.13.3+ | 当前用户已保存的共享 Tavily Key |
+| Serper Google Search | 1.13.3+ | 当前用户已保存的共享 Serper Key |
+| KoboldCpp WebSearch | 1.13.3+ | 当前 Text Completion 中配置 KoboldCpp 1.81.1+，并以 `--websearch` 启动 |
+| Extras API | 可选兼容 | 已废弃；需另行配置含 `websearch` 模块的 Extras API，只提供聚合研究包 |
+| Selenium Plugin | 可选兼容 | 需安装并启用 WebSearch Selenium server plugin，只提供聚合研究包 |
+| OpenAI-compatible URL + Key 副规划器 | 1.18.0+ 支持 | 只负责隐藏规划；搜索仍使用上方选择的来源 |
 | AnySearch | 暂停 | 需要额外服务端代理，因此公开版不显示 |
 | Claude 原生搜索桥接 | 暂停 | 当前高级协议依赖额外响应适配，因此公开版不显示 |
 | Gemini 原生 Grounding | 暂停 | 原版酒馆不透传完整 Grounding 元数据，因此公开版不显示 |
 | Claude/Gemini 原生搜索 URL + Key、模型列表 | 暂停 | 需要专用服务端凭据与原生协议适配；不同于 OpenAI-compatible 副规划器 |
+
+Z.AI 不在支持列表中，也没有凭据入口或可调用路径。Extras/Selenium 返回的聚合正文与候选链接不能证明“每条事实对应哪个 URL”，因此这两个来源始终使用中性聚合研究包，不构造隐藏工具结果，也不要求模型生成逐条 Markdown 引用。
 
 暂停项目的实现代码暂时保留在硬编码关闭的内部开关后，旧设置不会继续调用它们。以后如果配套服务端方案成熟，再单独恢复。
 
@@ -57,6 +64,30 @@
 - 只采用带合法 HTTP(S) 链接的自然搜索结果。
 
 `hl`、`gl`、指定 secret ID、专用超时和脱敏服务端错误等增强参数目前暂停，不在界面中显示。SerpAPI 协议可参考 [Google Search API](https://serpapi.com/search-api) 与 [Organic Results](https://serpapi.com/organic-results)。
+
+### Tavily AI Search
+
+扩展复用原版 SillyTavern 的 `SECRET_KEYS.TAVILY` 与 Tavily 搜索路由。Tavily Key 是当前用户的共享服务端 secret：在 P1G搜中保存或删除，也会影响 WebSearch 等其他使用者。每次查询使用基础搜索深度，不请求图片；只保留具有合法 HTTP(S) URL 的结果。Tavily 顶层 `answer` 没有稳定的逐条来源映射，因此不会被当作可引用证据。服务与额度见 [Tavily](https://app.tavily.com/)。
+
+### Serper Google Search
+
+扩展复用原版 SillyTavern 的 `SECRET_KEYS.SERPER` 与 Serper 搜索路由。Serper Key 同样是当前用户的共享服务端 secret；每条规划查询只请求一页，只采用具有合法 HTTP(S) URL 的自然结果。服务与额度见 [Serper](https://serper.dev/)。
+
+### KoboldCpp WebSearch
+
+该模式不在扩展里另存 URL 或 Key，而是继承 SillyTavern 当前 Text Completion → KoboldCpp 的服务器 URL。对应实例需要 KoboldCpp 1.81.1 或更新版本，并以 `--websearch` 启动。搜索由 KoboldCpp 的 WebSearch 端点完成；P1G搜仍负责隐藏规划、证据预算和最终注入。参见 [KoboldCpp releases](https://github.com/LostRuins/koboldcpp/releases)。
+
+### Extras API（已废弃）
+
+这是为既有部署保留的兼容路径。必须先在 SillyTavern 中配置可用的 Extras API，并启用其 `websearch` 模块；[SillyTavern Extras](https://github.com/SillyTavern/SillyTavern-extras) 已停止维护，新安装不建议为此单独部署。
+
+Extras 只给出聚合正文与候选链接，无法可靠建立“某条事实 → 某个 URL”的映射。因此 P1G搜会强制使用中性聚合研究包，不构造 `hwr_web_search` 工具历史；候选链接只能作为核对方向，最终模型不得伪造逐条引用。
+
+### Selenium Plugin
+
+此模式需要在 SillyTavern 服务器额外安装并启用 [SillyTavern WebSearch Selenium](https://github.com/SillyTavern/SillyTavern-WebSearch-Selenium) server plugin。它是用户主动选择的可选来源；SearXNG、SerpAPI、Tavily、Serper、KoboldCpp 以及 P1G搜本身都不依赖该插件。
+
+Selenium Plugin 同样只返回聚合正文与候选链接，不能提供可靠的逐条事实归因。P1G搜会强制使用中性聚合研究包并禁止伪造逐条 Markdown 引用；选择 Google 或 DuckDuckGo 只改变插件端的搜索引擎，不改变这一安全边界。
 
 ## 当前回答模型的查询规划与最终回答策略
 
@@ -108,7 +139,7 @@
 - 保存或删除直连副 API 配置时，插件会从事务开始到设置回读与 Key 清理结束，短时锁定当前标签页的发送、继续、重生成、滑动和停止入口；纯 URL / 模型 / 名称修改也使用同一把锁，避免隐藏研究读取到半完成配置。写入 Key 的窗口内，当前页走原版 `CHAT_COMPLETION_SETTINGS_READY` 管线、且没有显式 `secret-id` 的 Custom 请求（包括后台 `generateRaw()`）还会被临时指定到每事务唯一且不存在的 secret ID：并发请求会因无有效凭据而失败，不会回退到瞬时活动的规划 Key。若写入、恢复或回滚后无法证明全局活动 Custom Key 安全，该保护和当前标签页发送锁都会保持到刷新。其他标签页无法由前端扩展锁定；同源扩展若绕过酒馆事件管线直接 `fetch`，或预先捕获并自行调用更底层的原函数，也处于同一信任边界，前端扩展无法可靠封锁。因此仍不要并行生成或轮换 Custom Key，并只安装可信扩展。
 - Base URL 可填写形如 `https://example.com/v1` 的地址；如果粘贴末尾 `/chat/completions`，扩展会归一化为 Base URL。修改已保存配置的 URL 时必须重新输入 Key，避免把旧凭据意外发送到新站点。
 - 只支持 OpenAI Chat Completions 兼容协议。只提供 Anthropic Messages 或 Gemini `generateContent` 原生接口的地址不能直接使用；请在 Connection Manager 建立对应来源的 Chat Completion Profile。
-- 直连模型仍只执行 `SEARCH / DONE`、查询生成、补搜和证据充分性判断。真正的网页查询继续由已选 SearXNG / SerpAPI 完成，最终正文始终由当前回答模型生成。
+- 直连模型仍只执行 `SEARCH / DONE`、查询生成、补搜和证据充分性判断。真正的网页查询继续由用户选择的搜索来源完成，最终正文始终由当前回答模型生成。
 - 请求显式关闭酒馆原生联网且不提交搜索工具，但无法阻止名称含 `:online`、模型自身或中转网关强制搜索；这可能产生额外搜索费用。
 - 请求由 SillyTavern 服务器发往所填地址。非 HTTPS 或不可信端点能够看到 Key、规划提示、设置范围内的最近聊天和搜索摘要；除可信本机回环地址外应坚持 HTTPS。允许普通用户填写任意地址还可能形成服务端请求（SSRF）风险，多人或公网酒馆必须限制配置权限并审计目标端点。
 
@@ -136,6 +167,8 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 
 自动模式会先依据当前 SillyTavern 连接能力选择通道。若请求还没发出时不能安全转换，就保留隐藏研究包；如果不可靠的中转在收到工具消息后才返回 4xx，浏览器扩展无法在同一轮透明重放，应该在设置中改为“固定使用隐藏研究包”。
 
+Extras API 与 Selenium Plugin 是例外：由于它们无法给聚合正文提供可靠的逐条 URL 映射，即使选择“隐藏工具结果优先”，也会强制保留中性聚合研究包，并把候选链接标为仅供核对的线索。
+
 当前扩展对 Gemini 3 专用来源始终保守使用隐藏研究包，因为当前酒馆转换协议无法在多次同名搜索时可靠保留调用 ID。SillyTavern 1.13.3–1.14.x 的 Gemini 后端还不能可靠执行 `tool_choice: none`，因此这些版本的全部 Gemini 来源都会自动回退隐藏研究包；1.15.0 及以上的非 Gemini 3 来源可恢复工具通道。Claude 与 DeepSeek 专用来源不受这个限制。
 
 ## 触发策略与 token
@@ -144,7 +177,7 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 - **每条消息都调用并至少搜索一次**：仍先调用所选规划器来提炼查询，但它不能否决首次搜索；本条明确禁止联网和纯本地日期/时间是例外。
 - **仅在用户明确要求联网时搜索**：先由本地规则识别“联网查、网页搜索、给来源、查证报道”等请求。未命中时零模型 token 跳过；命中后再调用所选规划器组织查询，并保证至少搜索一次。
 
-无论选择当前模型、Connection Profile 还是插件内直连，每一次首轮判断、补搜规划或最终充分性评估都是一次独立的规划模型 API 调用，会分别产生 token / 费用；最终正文又是当前主模型的一次调用。SearXNG / SerpAPI 查询是另一类搜索请求。选择 `:online` 或会强制联网的副模型时，即使插件关闭了原生搜索字段，上游仍可能自行搜索并额外收费。
+无论选择当前模型、Connection Profile 还是插件内直连，每一次首轮判断、补搜规划或最终充分性评估都是一次独立的规划模型 API 调用，会分别产生 token / 费用；最终正文又是当前主模型的一次调用。所选搜索来源的查询是另一类请求，可能单独消耗搜索额度。选择 `:online` 或会强制联网的副模型时，即使插件关闭了原生搜索字段，上游仍可能自行搜索并额外收费。
 
 换句话说，“查询与回答策略”决定**怎样判断模糊情况、怎样查、怎样写**；“触发策略”决定**这一轮是否进入研究流程，以及首次搜索能否被跳过**。当前用户明确要求“不联网”始终拥有最高优先级。规划器不会向用户直接回答；所有历史文本和搜索摘要都作为不可信数据封装，网页中的指令不会被执行。
 ### 自定义补充提示词
@@ -160,9 +193,9 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 
 1. 正式生成开始前，`generate_interceptor` 读取最近对话。
 2. 当前模型通过隐藏 `generateRaw()`、指定 Connection Profile，或 1.18.0+ 的插件内 OpenAI-compatible 直连配置执行规划查询。
-3. 扩展调用 SearXNG 或 SerpAPI，并根据证据缺口决定是否补搜。
+3. 扩展调用用户选择的搜索来源，并根据证据缺口决定是否补搜。
 4. 扩展先把带唯一标记的研究包作为临时 system-role `IN_CHAT` 提示加入本轮 token 预算。
-5. 在 `CHAT_COMPLETION_SETTINGS_READY` 阶段，自动模式会把标记块改写为请求内的客户端工具调用与工具结果；不能安全改写时原样保留中性研究包。
+5. 在 `CHAT_COMPLETION_SETTINGS_READY` 阶段，自动模式会把结构化结果的标记块改写为请求内的客户端工具调用与工具结果；不能安全改写，或当前为 Extras/Selenium 聚合结果时，原样保留中性研究包。
 6. `GENERATION_ENDED`、`GENERATION_STOPPED` 和 `CHAT_CHANGED` 都会清除临时状态。
 
 研究证据不会写入聊天、工具调用消息、附件、Data Bank、LocalStorage 或 IndexedDB，但会临时发送给最终回答所使用的模型或中转。
@@ -182,7 +215,7 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 - 总证据字符：18000
 - regenerate 复用：600 秒
 
-酒馆原生“启用联网搜索”和 WebSearch 扩展内部 `Enabled`、`Use Function Tool` 应保持关闭；P1G搜（颜料搜）直接复用酒馆服务端搜索路由。Claude 与多数来源要使用隐藏工具结果通道时，请开启全局“启用函数调用”；DeepSeek 专用来源的已完成工具历史不依赖这个开关。其他不满足条件的连接会自动回退隐藏研究包。
+酒馆原生“启用联网搜索”和 WebSearch 扩展内部 `Enabled`、`Use Function Tool` 应保持关闭；P1G搜（颜料搜）独立调用所选搜索来源。Claude 与多数来源要使用隐藏工具结果通道时，请开启全局“启用函数调用”；DeepSeek 专用来源的已完成工具历史不依赖这个开关。Extras/Selenium 固定使用聚合研究包，其他不满足条件的连接也会自动回退隐藏研究包。
 
 ## 安装与更新
 
@@ -192,7 +225,16 @@ Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不�
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.10.0`。最低支持 SillyTavern `1.13.3`；`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.11.0`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.11.0`：
+
+- 新增 Tavily、Serper 与 KoboldCpp WebSearch 来源，并恢复 Extras API、Selenium Plugin 的可选兼容入口；明确不提供 Z.AI；
+- Tavily 与 Serper 复用当前 SillyTavern 用户的共享服务端 secret；保存、删除与测试行为和 SerpAPI 一样在界面中明确提示；
+- KoboldCpp 继承当前 Text Completion → KoboldCpp URL，不在扩展里重复保存地址或密钥；
+- Extras API 标记为已废弃；Selenium 明确要求对应 server plugin。两者强制使用中性聚合研究包，候选链接不得伪装成逐条事实引用；
+- 新来源沿用隐藏规划、搜索预算、内存缓存、时间锚、无聊天楼层与原生搜索关闭策略；
+- 设置 schema 升为 12，最低 SillyTavern 版本保持 1.13.3，新版功能在 1.18.x 上不受损失。
 
 `1.10.0`：
 
@@ -273,13 +315,13 @@ https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 
 ## 密钥与日志
 
-SerpAPI 密码框只用于写入当前 SillyTavern 用户的共享服务端 secrets；成功后不会把明文 Key 写进扩展设置或聊天。删除当前共享 Key 会同时影响 WebSearch 等其他使用者，因此界面会二次确认。
+SerpAPI、Tavily 与 Serper 密码框只用于写入当前 SillyTavern 用户各自的共享服务端 secrets；成功后不会把明文 Key 写进扩展设置或聊天。删除当前共享 Key 会同时影响 WebSearch 等其他使用者，因此界面会二次确认。
 
 插件内直连副规划器的 Key 写入当前用户的原版 `SECRET_KEYS.CUSTOM` 服务端 secrets；配置列表只保存名称、Base URL、模型和不透明 `secretId`。保存成功后密码框清空，扩展不会读取、回显、记录或导出 raw Key。切换配置只更换请求所引用的 `secretId`；SillyTavern 1.18.0 以下不会开放该能力，也不会通过轮换全局 Custom Key 模拟隔离。
 
 保存新 Key 时，原版接口不可避免地会先把它标为活动项。插件会在安全条件下立即恢复此前活动项，但这一写入窗口并非服务端原子事务；请不要跨标签页并行生成或轮换 Custom Key。设置保存、Key 写入、轮换与删除均会回读验证；状态不明、Key 仍活动、来源不属于本插件或可能被 Connection Manager 引用时一律保留，不做猜测性删除。
 
-本扩展自己的调试日志不打印搜索正文。原版 SillyTavern 的服务端搜索路由可能按照其自身实现记录查询或上游响应；在多人或公网环境使用前，请根据你的隐私要求审查并配置酒馆日志。
+本扩展自己的调试日志不打印搜索正文。原版 SillyTavern 的搜索路由、KoboldCpp、Extras API、Selenium Plugin 或外部搜索服务可能按照各自实现记录查询或上游响应；在多人或公网环境使用前，请根据你的隐私要求审查并配置相关日志。
 
 ## 开发检查
 

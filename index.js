@@ -16,10 +16,14 @@ import {
 } from '../../../../script.js';
 import { DOMPurify } from '../../../../lib.js';
 import {
+    doExtrasFetch,
     extension_settings,
+    getApiUrl,
+    modules,
     renderExtensionTemplateAsync,
 } from '../../../extensions.js';
 import { is_group_generating } from '../../../group-chats.js';
+import { textgen_types, textgenerationwebui_settings } from '../../../textgen-settings.js';
 import { cancelDebounce } from '../../../utils.js';
 import {
     deleteSecret,
@@ -35,7 +39,11 @@ import {
 } from './research-gate.js';
 import {
     normalizeAnySearchResponse,
+    normalizeKoboldCppResponse,
+    normalizeLegacyBrowserSearchResponse,
     normalizeSerpApiResponse,
+    normalizeSerperResponse,
+    normalizeTavilyResponse,
 } from './search-providers.js';
 import {
     buildPlannerJsonSchema,
@@ -142,13 +150,14 @@ const ADAPTERS = new Set([
     'other',
 ]);
 const SEARCH_POLICIES = new Set(['auto', 'always', 'explicit']);
+const BROWSER_SEARCH_ENGINES = new Set(['google', 'duckduckgo']);
 const RESEARCH_TRANSPORTS = new Set(['auto', 'prompt']);
 const RESEARCH_BACKENDS = new Set(getEnabledResearchBackends());
 const CONNECTION_MODES = new Set(['profile', 'direct']);
 const HANDLED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe']);
 
 const defaultSettings = {
-    schemaVersion: 11,
+    schemaVersion: 12,
     enabled: false,
     adapter: 'auto',
     searchPolicy: 'auto',
@@ -168,6 +177,8 @@ const defaultSettings = {
     anysearchLanguage: '',
     serpapiLanguage: '',
     serpapiCountry: '',
+    extrasEngine: 'google',
+    seleniumEngine: 'google',
     claudeProfileId: '',
     claudeConnectionMode: 'profile',
     claudeDirectUrl: '',
@@ -221,6 +232,8 @@ const plannerDirectCredentialSealedRequests = new WeakMap();
  * @property {string} query
  * @property {SearchItem[]} items
  * @property {string} formatted
+ * @property {{provider: string, engine: string, text: string, candidateLinks: string[]}|null} [aggregateEvidence]
+ * @property {boolean} [forcePromptTransport]
  */
 
 /**
@@ -330,6 +343,8 @@ function normalizeSettings(settings) {
     setValue('anysearchLanguage', String(settings.anysearchLanguage || '').trim().slice(0, 20));
     setValue('serpapiLanguage', String(settings.serpapiLanguage || '').trim().toLowerCase().slice(0, 20));
     setValue('serpapiCountry', String(settings.serpapiCountry || '').trim().toLowerCase().slice(0, 2));
+    setValue('extrasEngine', BROWSER_SEARCH_ENGINES.has(settings.extrasEngine) ? settings.extrasEngine : 'google');
+    setValue('seleniumEngine', BROWSER_SEARCH_ENGINES.has(settings.seleniumEngine) ? settings.seleniumEngine : 'google');
     setValue('claudeProfileId', String(settings.claudeProfileId || ''));
     if (!CONNECTION_MODES.has(settings.claudeConnectionMode)) setValue('claudeConnectionMode', defaultSettings.claudeConnectionMode);
     setValue('claudeDirectUrl', String(settings.claudeDirectUrl || '').trim());
@@ -387,6 +402,26 @@ function getSearchApiDefinition(provider) {
             keyRequired: true,
         };
     }
+    if (provider === 'tavily') {
+        return {
+            label: 'Tavily',
+            secretKey: SECRET_KEYS.TAVILY,
+            keySelector: '#hwr_tavily_key',
+            statusSelector: '#hwr_tavily_status',
+            saveSelector: '#hwr_save_tavily_key',
+            keyRequired: true,
+        };
+    }
+    if (provider === 'serper') {
+        return {
+            label: 'Serper',
+            secretKey: SECRET_KEYS.SERPER,
+            keySelector: '#hwr_serper_key',
+            statusSelector: '#hwr_serper_status',
+            saveSelector: '#hwr_save_serper_key',
+            keyRequired: true,
+        };
+    }
     throw new Error(`Unsupported search API provider: ${provider}`);
 }
 
@@ -412,11 +447,11 @@ function updateSearchApiCredentialStatus(provider, overrideText = '') {
             ? `${definition.label} Key 已由 SillyTavern 服务端保管，不会回填浏览器。`
             : anonymous
                 ? '当前使用 AnySearch 匿名额度；可选填 Key 提高配额与并发。'
-                : '尚未保存 SerpAPI Key。'
+                : `尚未保存 ${definition.label} Key。`
     ));
     $(definition.keySelector).attr(
         'placeholder',
-        activeSecret ? '已保存；留空不会替换 Key' : provider === 'anysearch' ? '可留空使用匿名模式' : '输入 SerpAPI Key',
+        activeSecret ? '已保存；留空不会替换 Key' : provider === 'anysearch' ? '可留空使用匿名模式' : `输入 ${definition.label} Key`,
     );
 }
 
@@ -433,7 +468,7 @@ async function saveSearchApiKey(provider) {
             updateSearchApiCredentialStatus(provider);
             toastr.info('现有 Key 保持不变', definition.label);
         } else if (definition.keyRequired) {
-            toastr.warning('请先输入 SerpAPI Key', DISPLAY_NAME);
+            toastr.warning(`请先输入 ${definition.label} Key`, DISPLAY_NAME);
         } else {
             updateSearchApiCredentialStatus(provider);
             toastr.info('AnySearch 将继续使用匿名额度', DISPLAY_NAME);
@@ -478,12 +513,12 @@ async function clearSearchApiKey(provider) {
     const activeSecret = getActiveSearchApiSecret(provider);
     if (!activeSecret) {
         updateSearchApiCredentialStatus(provider);
-        toastr.info(provider === 'anysearch' ? '当前已经是匿名模式' : '当前没有 SerpAPI Key');
+        toastr.info(provider === 'anysearch' ? '当前已经是匿名模式' : `当前没有 ${definition.label} Key`);
         return;
     }
-    const warning = provider === 'serpapi'
-        ? '这会删除 SillyTavern 当前共享的 SerpAPI Key，WebSearch 等其他功能也会受影响。确定继续吗？'
-        : '确定删除全部已保存的 AnySearch Key 并切回匿名额度吗？';
+    const warning = provider === 'anysearch'
+        ? '确定删除全部已保存的 AnySearch Key 并切回匿名额度吗？'
+        : `这会删除 SillyTavern 当前共享的 ${definition.label} Key，原版 WebSearch 等其他功能也会受影响。确定继续吗？`;
     if (!confirm(warning)) return;
     const recordsToDelete = provider === 'anysearch'
         ? getSearchApiSecrets(provider)
@@ -505,12 +540,12 @@ async function clearSearchApiKey(provider) {
     }
     if (remainingActive) {
         toastr.warning(
-            '当前 SerpAPI Key 已删除；SillyTavern 自动启用了一个历史共享 Key。',
+            `当前 ${definition.label} Key 已删除；SillyTavern 自动启用了一个历史共享 Key。`,
             DISPLAY_NAME,
         );
         return;
     }
-    toastr.success('当前共享 SerpAPI Key 已删除');
+    toastr.success(`当前共享 ${definition.label} Key 已删除`);
 }
 
 function getDirectProviderDefinition(provider) {
@@ -1401,9 +1436,12 @@ function isClientToolTransportSupported() {
 function updateResolvedTransportLabel() {
     const settings = getSettings();
     const supported = isClientToolTransportSupported();
-    const transport = resolveResearchTransport(settings.resultTransport, supported);
-    const text = transport === 'tool'
-        ? '当前注入：隐藏客户端工具结果（最终请求会禁用厂商原生搜索与后续工具调用）'
+    const aggregateBackend = ['extras', 'selenium'].includes(settings.researchBackend);
+    const transport = aggregateBackend ? 'prompt' : resolveResearchTransport(settings.resultTransport, supported);
+    const text = aggregateBackend
+        ? '当前注入：该旧式来源只提供未逐条归因的聚合摘要，固定使用隐藏研究包'
+        : transport === 'tool'
+            ? '当前注入：隐藏客户端工具结果（最终请求会禁用厂商原生搜索与后续工具调用）'
         : settings.resultTransport === 'prompt'
             ? '当前注入：固定使用隐藏研究包'
             : '当前注入：工具消息转换不安全或函数调用不可用，自动使用隐藏研究包';
@@ -1794,27 +1832,52 @@ function getAnySearchConfig(settings = getSettings()) {
     };
 }
 
-function getSerpApiConfig() {
-    // Stock SillyTavern uses only the active shared key and the query. Enhanced
-    // hl/gl and explicit secret selection remain paused with the server adapter.
+function getSharedSearchApiConfig(provider) {
     return {
-        secretId: getActiveSearchApiSecret('serpapi')?.id || '',
+        secretId: getActiveSearchApiSecret(provider)?.id || '',
     };
+}
+
+function getKoboldCppConfig() {
+    const baseUrl = String(textgenerationwebui_settings?.server_urls?.[textgen_types.KOBOLDCPP] || '').trim();
+    return { baseUrl };
+}
+
+function getBrowserSearchConfig(backend, settings = getSettings()) {
+    const engine = backend === 'extras' ? settings.extrasEngine : settings.seleniumEngine;
+    let apiUrl = '';
+    if (backend === 'extras') {
+        try {
+            apiUrl = String(getApiUrl() || '').trim();
+        } catch {
+            apiUrl = '';
+        }
+    }
+    return { engine, apiUrl };
 }
 
 function getStructuredSearchConfiguration(backend, settings = getSettings()) {
     if (backend === 'searxng') return getSearxngConfig(settings);
     if (backend === 'anysearch') return getAnySearchConfig(settings);
-    if (backend === 'serpapi') return getSerpApiConfig(settings);
+    if (['serpapi', 'tavily', 'serper'].includes(backend)) return getSharedSearchApiConfig(backend);
+    if (backend === 'koboldcpp') return getKoboldCppConfig();
+    if (['extras', 'selenium'].includes(backend)) return getBrowserSearchConfig(backend, settings);
     return {};
 }
 
 function getSearchBackendLabel(backend) {
-    if (backend === 'anysearch') return 'AnySearch';
-    if (backend === 'serpapi') return 'SerpAPI';
-    return 'SearXNG';
+    const labels = {
+        anysearch: 'AnySearch',
+        serpapi: 'SerpAPI',
+        searxng: 'SearXNG',
+        tavily: 'Tavily',
+        serper: 'Serper',
+        koboldcpp: 'KoboldCpp',
+        extras: 'Extras API',
+        selenium: 'Selenium Plugin',
+    };
+    return labels[backend] || String(backend || 'Web Search');
 }
-
 async function runAbortableRequest(callback, timeoutMs) {
     const controller = new AbortController();
     activeAbortController = controller;
@@ -1940,6 +2003,75 @@ function formatStructuredSourceEvidence(sourceState, settings) {
     };
 }
 
+function formatLegacyAggregateEvidence(records, settings) {
+    const opening = '<unattributed_web_search_summaries>';
+    const closing = '</unattributed_web_search_summaries>';
+    const blocks = [];
+    let currentLength = opening.length + closing.length + 2;
+    let truncated = false;
+
+    for (const [index, record] of records.entries()) {
+        const candidateLinks = Array.isArray(record.candidateLinks) ? record.candidateLinks : [];
+        const candidateUrls = settings.includeSourceLinks && candidateLinks.length
+            ? `
+<candidate_urls>
+${candidateLinks.map(url => `<url>${escapeXml(truncateText(url, 800))}</url>`).join('\n')}
+</candidate_urls>`
+            : '';
+        const block = `<aggregate_summary index="${index + 1}" provider="${escapeXml(record.provider)}" engine="${escapeXml(record.engine)}">
+<search_query>${escapeXml(truncateText(record.query, 500))}</search_query>
+<attribution_warning>This provider returned one aggregate search-page summary and a separate candidate URL list. The text is not mapped to individual URLs. Never claim that a statement came from a candidate URL unless the text itself establishes that mapping.</attribution_warning>
+<summary_text>${escapeXml(truncateText(record.text, 6000))}</summary_text>${candidateUrls}
+</aggregate_summary>`;
+        if (currentLength + block.length > settings.maxEvidenceChars) {
+            const remaining = settings.maxEvidenceChars - currentLength - 350;
+            if (remaining > 300) {
+                const shortened = {
+                    ...record,
+                    text: truncateText(record.text, remaining),
+                    candidateLinks: [],
+                };
+                const fallback = `<aggregate_summary index="${index + 1}" provider="${escapeXml(shortened.provider)}" engine="${escapeXml(shortened.engine)}">
+<search_query>${escapeXml(truncateText(shortened.query, 500))}</search_query>
+<attribution_warning>Unattributed aggregate summary; no statement may be assigned to a candidate URL.</attribution_warning>
+<summary_text>${escapeXml(shortened.text)}</summary_text>
+</aggregate_summary>`;
+                if (currentLength + fallback.length <= settings.maxEvidenceChars) blocks.push(fallback);
+            }
+            truncated = true;
+            break;
+        }
+        blocks.push(block);
+        currentLength += block.length;
+    }
+
+    return {
+        evidence: blocks.length ? `${opening}\n${blocks.join('\n')}\n${closing}` : '',
+        truncated,
+    };
+}
+
+
+function formatCombinedResearchEvidence(sourceState, aggregateRecords, settings) {
+    const structured = formatStructuredSourceEvidence(sourceState, settings);
+    const parts = structured.evidence ? [structured.evidence] : [];
+    const separatorBudget = parts.length ? 2 : 0;
+    const remaining = Math.max(
+        0,
+        settings.maxEvidenceChars - (structured.evidence?.length || 0) - separatorBudget,
+    );
+    const aggregate = remaining > 300
+        ? formatLegacyAggregateEvidence(aggregateRecords, {
+            ...settings,
+            maxEvidenceChars: remaining,
+        })
+        : { evidence: '', truncated: aggregateRecords.length > 0 };
+    if (aggregate.evidence) parts.push(aggregate.evidence);
+    return {
+        evidence: parts.join('\n\n'),
+        truncated: structured.truncated || aggregate.truncated,
+    };
+}
 async function searchSearxng(query, settings) {
     const { baseUrl, preferences } = getSearxngConfig(settings);
     const cacheKey = `${baseUrl}\n${preferences}\n${query.toLowerCase()}\n${settings.maxResultsPerQuery}\n${settings.maxCharsPerQuery}\n${settings.includeSourceLinks}`;
@@ -1990,6 +2122,36 @@ function getSearchApiFailureMessage(provider, status) {
     if (status === 429) return `${label} 请求过快或搜索额度已用完`;
     if (status >= 500) return `${label} 服务暂时不可用`;
     return `${label} 请求失败（${status}）`;
+}
+
+async function readSearchJson(response, label) {
+    const raw = await response.text();
+    try {
+        return JSON.parse(raw);
+    } catch {
+        throw new Error(label + ' 返回了无效 JSON');
+    }
+}
+
+function getCachedSearchResult(cacheKey, settings) {
+    const cached = queryCache.get(cacheKey);
+    return cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()
+        ? cached.result
+        : null;
+}
+
+function cacheSearchResult(cacheKey, result, settings) {
+    if (settings.reuseSeconds <= 0) return;
+    queryCache.set(cacheKey, { timestamp: Date.now(), result });
+    pruneCache(queryCache);
+}
+
+function buildUrlBackedSearchResult(query, rawItems, settings, cacheKey, emptyMessage) {
+    const items = limitSearchItemsToCharacterBudget(query, rawItems, settings);
+    if (!items.length) throw new Error(emptyMessage);
+    const result = { query, items, formatted: formatSearchItems(query, items, settings) };
+    cacheSearchResult(cacheKey, result, settings);
+    return result;
 }
 
 async function searchAnySearch(query, settings) {
@@ -2045,54 +2207,256 @@ async function searchAnySearch(query, settings) {
 }
 
 async function searchSerpApi(query, settings) {
-    const config = getSerpApiConfig(settings);
-    if (!config.secretId) {
-        throw new Error('尚未保存 SerpAPI Key');
-    }
-    const cacheKey = `serpapi\n${config.secretId}\n${query.toLowerCase()}\n${settings.maxResultsPerQuery}\n${settings.maxCharsPerQuery}\n${settings.includeSourceLinks}`;
-    const cached = queryCache.get(cacheKey);
-    if (cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()) {
-        return cached.result;
-    }
+    const config = getSharedSearchApiConfig('serpapi');
+    if (!config.secretId) throw new Error('尚未保存 SerpAPI Key');
+    const cacheKey = [
+        'serpapi', config.secretId, query.toLowerCase(), settings.maxResultsPerQuery,
+        settings.maxCharsPerQuery, settings.includeSourceLinks,
+    ].join('\n');
+    const cached = getCachedSearchResult(cacheKey, settings);
+    if (cached) return cached;
 
     const response = await runAbortableRequest(signal => fetch('/api/search/serpapi', {
         method: 'POST',
         headers: getRequestHeaders(),
-        // Stock SillyTavern's SerpAPI route reliably accepts only the query and
-        // always uses the currently active shared SerpAPI key.
+        // Stock SillyTavern uses the currently active shared SerpAPI key.
         body: JSON.stringify({ query }),
         signal,
     }), settings.requestTimeoutMs);
+    if (!response.ok) throw new Error(getSearchApiFailureMessage('serpapi', response.status));
 
-    if (!response.ok) {
-        throw new Error(getSearchApiFailureMessage('serpapi', response.status));
-    }
-
-    let payload;
-    try {
-        payload = await response.json();
-    } catch {
-        throw new Error('SerpAPI 返回了无效 JSON');
-    }
+    const payload = await readSearchJson(response, 'SerpAPI');
     if (payload?.search_metadata?.status === 'Error' && !Array.isArray(payload.organic_results)) {
         throw new Error('SerpAPI 搜索处理失败');
     }
     const normalized = normalizeSerpApiResponse(payload, settings.maxResultsPerQuery);
-    const items = limitSearchItemsToCharacterBudget(query, normalized.items, settings);
-    if (!items.length) {
-        throw new Error('SerpAPI 没有返回可用的自然搜索结果');
-    }
+    return buildUrlBackedSearchResult(
+        query, normalized.items, settings, cacheKey, 'SerpAPI 没有返回可用的自然搜索结果',
+    );
+}
 
+async function searchTavily(query, settings) {
+    const config = getSharedSearchApiConfig('tavily');
+    if (!config.secretId) throw new Error('尚未保存 Tavily Key');
+    const cacheKey = [
+        'tavily', config.secretId, query.toLowerCase(), settings.maxResultsPerQuery,
+        settings.maxCharsPerQuery, settings.includeSourceLinks,
+    ].join('\n');
+    const cached = getCachedSearchResult(cacheKey, settings);
+    if (cached) return cached;
+
+    const response = await runAbortableRequest(signal => fetch('/api/search/tavily', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ query, include_images: false }),
+        signal,
+    }), settings.requestTimeoutMs);
+    if (!response.ok) throw new Error(getSearchApiFailureMessage('tavily', response.status));
+
+    const payload = await readSearchJson(response, 'Tavily');
+    const normalized = normalizeTavilyResponse(payload, settings.maxResultsPerQuery);
+    return buildUrlBackedSearchResult(
+        query, normalized.items, settings, cacheKey, 'Tavily 没有返回带来源 URL 的可用结果',
+    );
+}
+
+async function searchSerper(query, settings) {
+    const config = getSharedSearchApiConfig('serper');
+    if (!config.secretId) throw new Error('尚未保存 Serper Key');
+    const cacheKey = [
+        'serper', config.secretId, query.toLowerCase(), settings.maxResultsPerQuery,
+        settings.maxCharsPerQuery, settings.includeSourceLinks,
+    ].join('\n');
+    const cached = getCachedSearchResult(cacheKey, settings);
+    if (cached) return cached;
+
+    const response = await runAbortableRequest(signal => fetch('/api/search/serper', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ query, images: false }),
+        signal,
+    }), settings.requestTimeoutMs);
+    if (!response.ok) throw new Error(getSearchApiFailureMessage('serper', response.status));
+
+    const payload = await readSearchJson(response, 'Serper');
+    const normalized = normalizeSerperResponse(payload, settings.maxResultsPerQuery);
+    return buildUrlBackedSearchResult(
+        query, normalized.items, settings, cacheKey, 'Serper 没有返回带来源 URL 的自然搜索结果',
+    );
+}
+
+async function searchKoboldCpp(query, settings) {
+    const { baseUrl } = getKoboldCppConfig();
+    if (!baseUrl) throw new Error('尚未在 SillyTavern 中配置 KoboldCpp URL');
+    const cacheKey = [
+        'koboldcpp', hashString(baseUrl), query.toLowerCase(), settings.maxResultsPerQuery,
+        settings.maxCharsPerQuery, settings.includeSourceLinks,
+    ].join('\n');
+    const cached = getCachedSearchResult(cacheKey, settings);
+    if (cached) return cached;
+
+    const response = await runAbortableRequest(signal => fetch('/api/search/koboldcpp', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ query, url: baseUrl }),
+        signal,
+    }), settings.requestTimeoutMs);
+    if (!response.ok) throw new Error(getSearchApiFailureMessage('koboldcpp', response.status));
+
+    const payload = await readSearchJson(response, 'KoboldCpp');
+    const normalized = normalizeKoboldCppResponse(payload, settings.maxResultsPerQuery);
+    return buildUrlBackedSearchResult(
+        query, normalized.items, settings, cacheKey, 'KoboldCpp 没有返回带来源 URL 的可用结果',
+    );
+}
+
+let seleniumProbeState = { checkedAt: 0, available: false };
+
+async function probeSeleniumSearchPlugin(settings, force = false) {
+    if (!force && seleniumProbeState.checkedAt + 30000 >= Date.now()) {
+        return seleniumProbeState.available;
+    }
+    try {
+        const response = await runAbortableRequest(signal => fetch('/api/plugins/selenium/probe', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            signal,
+        }), Math.min(settings.requestTimeoutMs, 10000));
+        seleniumProbeState = { checkedAt: Date.now(), available: response.ok };
+    } catch {
+        seleniumProbeState = { checkedAt: Date.now(), available: false };
+    }
+    return seleniumProbeState.available;
+}
+
+function buildLegacyAggregateResult(query, normalized, settings, cacheKey, provider, engine) {
+    const text = truncateText(normalized.aggregateText, Math.min(settings.maxCharsPerQuery, 6000));
+    if (!text) throw new Error(provider + ' 没有返回可用的聚合搜索摘要');
     const result = {
         query,
-        items,
-        formatted: formatSearchItems(query, items, settings),
+        items: [],
+        formatted: '',
+        aggregateEvidence: {
+            provider,
+            engine,
+            text,
+            candidateLinks: settings.includeSourceLinks ? normalized.candidateLinks : [],
+        },
+        forcePromptTransport: true,
     };
-    if (settings.reuseSeconds > 0) {
-        queryCache.set(cacheKey, { timestamp: Date.now(), result });
-        pruneCache(queryCache);
-    }
+    cacheSearchResult(cacheKey, result, settings);
     return result;
+}
+
+async function searchExtras(query, settings) {
+    const config = getBrowserSearchConfig('extras', settings);
+    if (!Array.isArray(modules) || !modules.includes('websearch')) {
+        throw new Error('Extras API 未加载 websearch 模块（该项目已停止维护）');
+    }
+    if (!config.apiUrl) throw new Error('尚未在 SillyTavern 中配置 Extras API URL');
+    let url;
+    try {
+        url = new URL(config.apiUrl);
+        if (!['http:', 'https:'].includes(url.protocol)) throw new Error('unsupported protocol');
+        url.pathname = '/api/websearch';
+        url.search = '';
+        url.hash = '';
+    } catch {
+        throw new Error('SillyTavern 中的 Extras API URL 无效');
+    }
+    const cacheKey = [
+        'extras', hashString(url.origin), config.engine, query.toLowerCase(),
+        settings.maxResultsPerQuery, settings.maxCharsPerQuery, settings.includeSourceLinks,
+    ].join('\n');
+    const cached = getCachedSearchResult(cacheKey, settings);
+    if (cached) return cached;
+
+    const response = await runAbortableRequest(signal => doExtrasFetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Bypass-Tunnel-Reminder': 'bypass',
+        },
+        body: JSON.stringify({ query, engine: config.engine }),
+        signal,
+    }), settings.requestTimeoutMs);
+    if (!response.ok) throw new Error(getSearchApiFailureMessage('extras', response.status));
+
+    const payload = await readSearchJson(response, 'Extras API');
+    const normalized = normalizeLegacyBrowserSearchResponse(payload, settings.maxResultsPerQuery);
+    return buildLegacyAggregateResult(
+        query, normalized, settings, cacheKey, 'Extras API', config.engine,
+    );
+}
+
+async function searchSelenium(query, settings) {
+    const config = getBrowserSearchConfig('selenium', settings);
+    if (!await probeSeleniumSearchPlugin(settings)) {
+        throw new Error('Selenium 搜索 server plugin 未安装、未启用或不可访问');
+    }
+    const cacheKey = [
+        'selenium', config.engine, query.toLowerCase(), settings.maxResultsPerQuery,
+        settings.maxCharsPerQuery, settings.includeSourceLinks,
+    ].join('\n');
+    const cached = getCachedSearchResult(cacheKey, settings);
+    if (cached) return cached;
+
+    const response = await runAbortableRequest(signal => fetch('/api/plugins/selenium/search', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            query,
+            engine: config.engine,
+            include_images: false,
+            max_links: settings.maxResultsPerQuery,
+        }),
+        signal,
+    }), settings.requestTimeoutMs);
+    if (!response.ok) throw new Error(getSearchApiFailureMessage('selenium', response.status));
+
+    const payload = await readSearchJson(response, 'Selenium Plugin');
+    const normalized = normalizeLegacyBrowserSearchResponse(payload, settings.maxResultsPerQuery);
+    return buildLegacyAggregateResult(
+        query, normalized, settings, cacheKey, 'Selenium Plugin', config.engine,
+    );
+}
+
+async function ensureStructuredSearchBackendReady(settings) {
+    const backend = settings.researchBackend;
+    if (['serpapi', 'tavily', 'serper'].includes(backend)) {
+        const label = getSearchBackendLabel(backend);
+        if (!getSharedSearchApiConfig(backend).secretId) throw new Error('尚未保存 ' + label + ' Key');
+        return;
+    }
+    if (backend === 'koboldcpp') {
+        if (!getKoboldCppConfig().baseUrl) throw new Error('尚未在 SillyTavern 中配置 KoboldCpp URL');
+        return;
+    }
+    if (backend === 'extras') {
+        if (!Array.isArray(modules) || !modules.includes('websearch')) {
+            throw new Error('Extras API 未加载 websearch 模块（该项目已停止维护）');
+        }
+        const { apiUrl } = getBrowserSearchConfig('extras', settings);
+        if (!apiUrl) {
+            throw new Error('尚未在 SillyTavern 中配置 Extras API URL');
+        }
+        try {
+            const parsed = new URL(apiUrl);
+            if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported protocol');
+        } catch {
+            throw new Error('SillyTavern 中的 Extras API URL 无效');
+        }
+        return;
+    }
+    if (backend === 'selenium') {
+        if (!await probeSeleniumSearchPlugin(settings)) {
+            throw new Error('Selenium 搜索 server plugin 未安装、未启用或不可访问');
+        }
+        return;
+    }
+    if (backend === 'searxng') return;
+    if (backend === 'anysearch' && ENABLE_SERVER_DEPENDENT_FEATURES) return;
+    throw new Error('不支持的搜索来源：' + backend);
 }
 
 async function searchStructuredBackend(query, settings) {
@@ -2103,8 +2467,13 @@ async function searchStructuredBackend(query, settings) {
         return searchAnySearch(query, settings);
     }
     if (settings.researchBackend === 'serpapi') return searchSerpApi(query, settings);
+    if (settings.researchBackend === 'tavily') return searchTavily(query, settings);
+    if (settings.researchBackend === 'serper') return searchSerper(query, settings);
+    if (settings.researchBackend === 'koboldcpp') return searchKoboldCpp(query, settings);
+    if (settings.researchBackend === 'extras') return searchExtras(query, settings);
+    if (settings.researchBackend === 'selenium') return searchSelenium(query, settings);
     if (settings.researchBackend === 'searxng') return searchSearxng(query, settings);
-    throw new Error(`Unsupported research backend: ${settings.researchBackend}`);
+    throw new Error('Unsupported research backend: ' + settings.researchBackend);
 }
 
 function buildResearchPacket({
@@ -2121,13 +2490,23 @@ function buildResearchPacket({
     const sourceInstruction = getResearchCitationInstruction(settings.includeSourceLinks);
     const answerCustomization = buildStrategyAnswerCustomization(settings);
     const envelopeName = 'hidden_web_research';
+    const backendProvenance = {
+        searxng: 'The evidence was gathered from the configured SearXNG instance.',
+        anysearch: 'The evidence was gathered through the configured AnySearch REST API.',
+        serpapi: 'The evidence was gathered through the configured SerpAPI search source.',
+        tavily: 'The evidence was gathered through the configured Tavily search source.',
+        serper: 'The evidence was gathered through the configured Serper search source.',
+        koboldcpp: 'The evidence was gathered through the configured KoboldCpp web search source.',
+        extras: 'The evidence was gathered through the configured legacy Extras API websearch module.',
+        selenium: 'The evidence was gathered through the configured Selenium search server plugin.',
+    };
     const provenance = nativeClaude
         ? 'The evidence was gathered through a separate Claude connection using Anthropic web search.'
-        : searchBackend === 'anysearch'
-            ? 'The evidence was gathered through the configured AnySearch REST API.'
-            : searchBackend === 'serpapi'
-                ? 'The evidence was gathered through the configured SerpAPI Google Search API.'
-                : 'The evidence was gathered from the configured SearXNG instance.';
+        : backendProvenance[searchBackend]
+            || 'The evidence was gathered through the configured external web search source.';
+    const aggregateCitationRule = ['extras', 'selenium'].includes(searchBackend)
+        ? 'Aggregate summaries and candidate URL lists are not mapped to each other. Never attribute a statement to, or cite, a candidate URL as supporting that statement unless the supplied text explicitly establishes the association.'
+        : '';
     const gaps = [...new Set(unresolvedGaps.map(normalizeWhitespace).filter(Boolean))].slice(0, 8);
     const gapsBlock = gaps.length
         ? gaps.map(gap => `<gap>${escapeXml(gap)}</gap>`).join('\n')
@@ -2147,6 +2526,7 @@ ${responseProfile.instruction}
 ${answerCustomization}
 <citation_contract>
 ${sourceInstruction}
+${aggregateCitationRule}
 </citation_contract>
 
 <original_user_request>
@@ -2226,6 +2606,8 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             userText,
             queries: cached.queries || [],
             sources: cached.sources || [],
+            aggregateEvidence: [],
+            forcePromptTransport: false,
             unresolvedGaps: [],
             searchBackend: settings.researchBackend,
             researchPartial: false,
@@ -2233,8 +2615,12 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         };
     }
 
+    await ensureStructuredSearchBackendReady(settings);
+
     const totalQueryLimit = getEffectiveTotalQueryLimit(adapter, settings);
     let sourceState = { sources: [], nextSourceNumber: 1 };
+    const aggregateEvidenceState = [];
+    let forcePromptTransport = false;
     let evidence = [];
     let evidenceAtCapacity = false;
     let unresolvedGaps = [];
@@ -2413,10 +2799,27 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                     sourceState,
                     result.items.map(item => ({ ...item, query })),
                 );
-                const formatted = formatStructuredSourceEvidence(sourceState, settings);
+                const aggregate = result.aggregateEvidence;
+                if (aggregate?.text) {
+                    const aggregateRecord = { ...aggregate, query };
+                    const duplicateIndex = aggregateEvidenceState.findIndex(record =>
+                        record.query === aggregateRecord.query
+                        && record.provider === aggregateRecord.provider
+                        && record.engine === aggregateRecord.engine,
+                    );
+                    if (duplicateIndex >= 0) {
+                        aggregateEvidenceState[duplicateIndex] = aggregateRecord;
+                    } else {
+                        aggregateEvidenceState.push(aggregateRecord);
+                    }
+                }
+                forcePromptTransport ||= Boolean(result.forcePromptTransport);
+                const formatted = formatCombinedResearchEvidence(
+                    sourceState, aggregateEvidenceState, settings,
+                );
                 evidence = formatted.evidence ? [formatted.evidence] : [];
                 evidenceAtCapacity = formatted.truncated;
-                successfulSearch = true;
+                successfulSearch = result.items.length > 0 || Boolean(aggregate?.text);
             } catch (error) {
                 if (!isRunCurrent(epoch, chatId)) return null;
                 hadSearchFailure = true;
@@ -2529,6 +2932,9 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             ...source,
             queries: [...source.queries],
         })),
+        aggregateEvidence: aggregateEvidenceState.map(record => ({ ...record })),
+        aggregateEvidenceCount: aggregateEvidenceState.length,
+        forcePromptTransport,
         unresolvedGaps: [...unresolvedGaps],
         searchBackend: settings.researchBackend,
         researchPartial,
@@ -2545,7 +2951,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     }
     updateStatus(
         researchPartial ? 'partial' : 'ready',
-        `${researchPartial ? '隐藏研究部分完成' : '隐藏研究完成'}：${seenQueries.length} 次搜索，${sourceState.sources.length} 个来源`,
+        `${researchPartial ? '隐藏研究部分完成' : '隐藏研究完成'}：${seenQueries.length} 次搜索，${sourceState.sources.length} 个可引用来源，${aggregateEvidenceState.length} 份聚合摘要`,
     );
     return research;
 }
@@ -3119,7 +3525,9 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
         }
 
         const toolCallingSupported = isClientToolTransportSupported();
-        const transport = resolveResearchTransport(settings.resultTransport, toolCallingSupported);
+        const transport = researchResult.forcePromptTransport
+            ? 'prompt'
+            : resolveResearchTransport(settings.resultTransport, toolCallingSupported);
         const invocations = transport === 'tool'
             ? buildClientWebSearchInvocations({
                 queries: researchResult.queries,
@@ -3152,9 +3560,11 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
             researchResult.packet,
         ].filter(Boolean).join('\n\n');
         setResearchPrompt(fallbackPrompt);
-        const fallbackReason = settings.resultTransport === 'prompt'
-            ? '已按设置使用隐藏研究包'
-            : '当前连接不支持安全工具消息，已自动回退隐藏研究包';
+        const fallbackReason = researchResult.forcePromptTransport
+            ? '聚合搜索摘要无法安全转换为逐 URL 工具结果，已使用隐藏研究包'
+            : settings.resultTransport === 'prompt'
+                ? '已按设置使用隐藏研究包'
+                : '当前连接不支持安全工具消息，已自动回退隐藏研究包';
         updateStatus(researchResult.researchPartial ? 'partial' : 'ready', fallbackReason);
     } catch (error) {
         if (isRunCurrent(epoch, chatId)) {
@@ -3403,14 +3813,19 @@ function switchBackendUi() {
     const backend = getSettings().researchBackend;
     $('#hwr_searxng_settings').toggle(backend === 'searxng');
     $('#hwr_serpapi_settings').toggle(backend === 'serpapi');
+    $('#hwr_tavily_settings').toggle(backend === 'tavily');
+    $('#hwr_serper_settings').toggle(backend === 'serper');
+    $('#hwr_koboldcpp_settings').toggle(backend === 'koboldcpp');
+    $('#hwr_extras_settings').toggle(backend === 'extras');
+    $('#hwr_selenium_settings').toggle(backend === 'selenium');
     $('#hwr_anysearch_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'anysearch');
     $('#hwr_claude_profile_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'claude_profile');
     $('#hwr_gemini_profile_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'gemini_profile');
     $('#hwr_source_links_label').toggle(backend !== 'gemini_profile');
-    $('#hwr_adapter_block').toggle(['searxng', 'serpapi', ...(ENABLE_SERVER_DEPENDENT_FEATURES ? ['anysearch'] : [])].includes(backend));
-    $('#hwr_planner_connection_settings').toggle(
-        ['searxng', 'serpapi', ...(ENABLE_SERVER_DEPENDENT_FEATURES ? ['anysearch'] : [])].includes(backend),
-    );
+    const usesHiddenPlanner = RESEARCH_BACKENDS.has(backend);
+    $('#hwr_adapter_block').toggle(usesHiddenPlanner);
+    $('#hwr_planner_connection_settings').toggle(usesHiddenPlanner);
+    updateResolvedTransportLabel();
 }
 
 function isPlannerDirectConnectionSupported() {
@@ -4763,9 +5178,8 @@ async function testStructuredSearchConnection(backend) {
         toastr.warning('隐藏研究正在运行，请等待本轮结束后再测试搜索服务');
         return;
     }
-    if (backend === 'serpapi' && !confirm('这会实际消耗一次 SerpAPI 搜索额度。继续吗？')) {
-        return;
-    }
+    if (['serpapi', 'tavily', 'serper'].includes(backend)
+        && !confirm('这会实际消耗一次 ' + getSearchBackendLabel(backend) + ' 搜索额度。继续吗？')) return;
     const settings = getSettings();
     const label = getSearchBackendLabel(backend);
     updateStatus('searching', `正在测试 ${label}…`);
@@ -4775,8 +5189,12 @@ async function testStructuredSearchConnection(backend) {
             researchBackend: backend,
             reuseSeconds: 0,
         });
-        updateStatus('ready', `${label} 正常：取得 ${result.items.length} 条结果`);
-        toastr.success(`取得 ${result.items.length} 条带 URL 的结果`, `${label} 测试成功`);
+        const aggregateCount = result.aggregateEvidence?.text ? 1 : 0;
+        const resultSummary = result.items.length
+            ? `取得 ${result.items.length} 条带 URL 的结果`
+            : `取得 ${aggregateCount} 份未逐条归因的聚合摘要`;
+        updateStatus('ready', `${label} 正常：${resultSummary}`);
+        toastr.success(resultSummary, `${label} 测试成功`);
     } catch (error) {
         updateStatus('error', `${label} 测试失败：${error.message || error}`);
         toastr.error(String(error.message || error), `${label} 测试失败`);
@@ -4947,6 +5365,18 @@ function bindSettingsUi() {
         invalidateRun('SearXNG preferences changed');
         saveSettingsDebounced();
     });
+    $('#hwr_extras_engine').val(settings.extrasEngine).on('change', function () {
+        settings.extrasEngine = String($(this).val() || 'google');
+        normalizeSettings(settings);
+        invalidateRun('Extras search engine changed', { clearCaches: true });
+        saveSettingsDebounced();
+    });
+    $('#hwr_selenium_engine').val(settings.seleniumEngine).on('change', function () {
+        settings.seleniumEngine = String($(this).val() || 'google');
+        normalizeSettings(settings);
+        invalidateRun('Selenium search engine changed', { clearCaches: true });
+        saveSettingsDebounced();
+    });
     if (ENABLE_SERVER_DEPENDENT_FEATURES) {
         $('#hwr_anysearch_zone').val(settings.anysearchZone).on('change', function () {
             settings.anysearchZone = String($(this).val() || '');
@@ -5010,10 +5440,12 @@ function bindSettingsUi() {
         $('#hwr_clear_claude_direct').on('click', () => clearDirectCredential('claude'));
         $('#hwr_clear_gemini_direct').on('click', () => clearDirectCredential('gemini'));
     }
-    const serpApiDefinition = getSearchApiDefinition('serpapi');
-    $(serpApiDefinition.keySelector).on('input', () => updateSearchApiCredentialStatus('serpapi', '有未保存的 Key'));
-    $('#hwr_save_serpapi_key').on('click', () => saveSearchApiKey('serpapi'));
-    $('#hwr_clear_serpapi_key').on('click', () => clearSearchApiKey('serpapi'));
+    for (const provider of ['serpapi', 'tavily', 'serper']) {
+        const definition = getSearchApiDefinition(provider);
+        $(definition.keySelector).on('input', () => updateSearchApiCredentialStatus(provider, '有未保存的 Key'));
+        $(definition.saveSelector).on('click', () => saveSearchApiKey(provider));
+        $('#hwr_clear_' + provider + '_key').on('click', () => clearSearchApiKey(provider));
+    }
     if (ENABLE_SERVER_DEPENDENT_FEATURES) {
         const anySearchDefinition = getSearchApiDefinition('anysearch');
         $(anySearchDefinition.keySelector).on('input', () => updateSearchApiCredentialStatus('anysearch', '有未保存的 Key'));
@@ -5065,6 +5497,11 @@ function bindSettingsUi() {
         $('#hwr_refresh_profiles').on('click', refreshClaudeProfiles);
         $('#hwr_refresh_gemini_profiles').on('click', refreshGeminiProfiles);
     }
+    $('#hwr_test_tavily').on('click', () => testStructuredSearchConnection('tavily'));
+    $('#hwr_test_serper').on('click', () => testStructuredSearchConnection('serper'));
+    $('#hwr_test_koboldcpp').on('click', () => testStructuredSearchConnection('koboldcpp'));
+    $('#hwr_test_extras').on('click', () => testStructuredSearchConnection('extras'));
+    $('#hwr_test_selenium').on('click', () => testStructuredSearchConnection('selenium'));
     $('#hwr_refresh_model').on('click', () => {
         updateResolvedAdapterLabel();
         updateResolvedTransportLabel();
@@ -5083,7 +5520,9 @@ function bindSettingsUi() {
         switchProviderConnectionUi('gemini');
         updateSearchApiCredentialStatus('anysearch');
     }
-    updateSearchApiCredentialStatus('serpapi');
+    for (const provider of ['serpapi', 'tavily', 'serper']) {
+        updateSearchApiCredentialStatus(provider);
+    }
     refreshPlannerProfiles();
     refreshPlannerDirectProfilesUi();
     updateResolvedAdapterLabel();
@@ -5092,9 +5531,9 @@ function bindSettingsUi() {
     if (pausedBackendMigration) {
         const previousBackend = pausedBackendMigration;
         pausedBackendMigration = '';
-        invalidateRun('Paused server-dependent backend migrated', { clearCaches: true });
-        updateStatus('paused', '原联网模式已暂停；扩展已关闭，请重新选择并手动启用');
-        toastr.warning(`原联网模式 ${previousBackend} 需要额外服务端适配，已切回 SearXNG 并关闭扩展。`, DISPLAY_NAME);
+        invalidateRun('Unsupported backend migrated', { clearCaches: true });
+        updateStatus('paused', '原联网模式当前不受支持；扩展已关闭，请重新选择并手动启用');
+        toastr.warning(`原联网模式 ${previousBackend} 当前不在公开支持列表中，已切回 SearXNG 并关闭扩展。`, DISPLAY_NAME);
     } else {
         updateStatus('idle', settings.enabled ? '已启用，等待下一次生成' : '已关闭');
     }

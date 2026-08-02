@@ -8,6 +8,14 @@ export const ENABLE_SERVER_DEPENDENT_FEATURES = false;
 export const STOCK_RESEARCH_BACKENDS = Object.freeze([
     'searxng',
     'serpapi',
+    'tavily',
+    'serper',
+    'koboldcpp',
+]);
+
+export const OPTIONAL_COMPONENT_RESEARCH_BACKENDS = Object.freeze([
+    'extras',
+    'selenium',
 ]);
 
 export const SERVER_DEPENDENT_RESEARCH_BACKENDS = Object.freeze([
@@ -17,9 +25,10 @@ export const SERVER_DEPENDENT_RESEARCH_BACKENDS = Object.freeze([
 ]);
 
 export function getEnabledResearchBackends() {
+    const publicBackends = [...STOCK_RESEARCH_BACKENDS, ...OPTIONAL_COMPONENT_RESEARCH_BACKENDS];
     return ENABLE_SERVER_DEPENDENT_FEATURES
-        ? [...STOCK_RESEARCH_BACKENDS, ...SERVER_DEPENDENT_RESEARCH_BACKENDS]
-        : [...STOCK_RESEARCH_BACKENDS];
+        ? [...publicBackends, ...SERVER_DEPENDENT_RESEARCH_BACKENDS]
+        : publicBackends;
 }
 
 export function normalizeResearchBackend(value) {
@@ -35,8 +44,8 @@ export function isResearchBackendEnabled(value) {
 
 export function resolveResearchBackendSelection(value, enabled) {
     const requestedBackend = String(value || '');
-    const paused = !ENABLE_SERVER_DEPENDENT_FEATURES
-        && SERVER_DEPENDENT_RESEARCH_BACKENDS.includes(requestedBackend);
+    const enabledBackends = getEnabledResearchBackends();
+    const paused = Boolean(requestedBackend) && !enabledBackends.includes(requestedBackend);
     return {
         requestedBackend,
         researchBackend: normalizeResearchBackend(requestedBackend),
