@@ -851,9 +851,10 @@ assert.match(
     /hostSendLock = acquirePlannerDirectHostSendLock\(\)[\s\S]*?flushPendingSettingsBeforePlannerDirectMutation\(settings\)[\s\S]*?hostSendLock\.assertSafe\(\)[\s\S]*?saveAndVerifyPlannerDirectSettings\(settings\)/u,
 );
 assert.match(indexSource, /if \(plannerDirectSaveLocked\) \{[\s\S]*?本轮不启动隐藏研究/u);
-assert.match(settingsHtml, /保存和删除事务会短时锁定当前标签页/u);
-assert.match(settingsHtml, /后台 <code>generateRaw\(\)<\/code>[\s\S]*?随机不存在的 ID/u);
-assert.match(settingsHtml, /绕过事件管线直接 <code>fetch<\/code>[\s\S]*?同一信任边界/u);
+assert.match(visibleSettingsHtml, /<details class="hwr_subdetails">[\s\S]*?直连 Key 安全与版本说明/u);
+assert.match(visibleSettingsHtml, /独立直连配置需要 SillyTavern 1\.18\.0\+/u);
+assert.match(visibleSettingsHtml, /请勿跨标签页同时生成或轮换 Key/u);
+assert.match(visibleSettingsHtml, /完全避开共享密钥槽影响时请使用 Connection Profile/u);
 assert.match(await readFile(new URL('../README.md', import.meta.url), 'utf8'), /纯 URL \/ 模型 \/ 名称修改也使用同一把锁/u);
 assert.match(await readFile(new URL('../README.md', import.meta.url), 'utf8'), /后台 [^\r\n]*generateRaw\(\)[\s\S]*?每事务唯一且不存在的 secret ID/u);
 assert.doesNotMatch(
@@ -986,9 +987,9 @@ assert.match(
     visibleSettingsHtml,
     /<input[^>]+id="hwr_planner_direct_key"[^>]+type="password"[^>]+autocomplete="new-password"/u,
 );
-assert.match(visibleSettingsHtml, /\u6700\u7ec8\u6b63\u6587\u59cb\u7ec8\u4f7f\u7528\u5f53\u524d\u56de\u7b54\u6a21\u578b/u);
-assert.match(visibleSettingsHtml, /两种方式都不会切换当前回答的来源、Profile、URL 或模型/u);
-assert.match(visibleSettingsHtml, /首次写入空 Custom 密钥槽时会改变全局活动 Custom credential/u);
+assert.match(visibleSettingsHtml, /最终正文始终由当前回答模型生成/u);
+assert.match(visibleSettingsHtml, /副 API 只负责判断和规划查询/u);
+assert.match(visibleSettingsHtml, /保存时原版酒馆可能短暂切换活动 Custom Key/u);
 assert.match(indexSource, /\$\('#hwr_refresh_planner_profiles'\)\.on\('click', refreshPlannerProfiles\)/u);
 assert.match(indexSource, /\$\('#hwr_test_planner_profile'\)\.on\('click', testPlannerProfile\)/u);
 assert.match(indexSource, /\$\('#hwr_planner_direct_connection'\)\.on\('change', function \(\) \{/u);

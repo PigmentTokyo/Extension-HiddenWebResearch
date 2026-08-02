@@ -5,16 +5,20 @@
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <div class="hwr_intro">
-                兼容 SillyTavern 1.13.3 及以上版本（已验证 1.13.3–1.18.x）。自动判断是否搜索；支持 SearXNG、SerpAPI、Tavily、Serper、KoboldCpp，以及可选的 Extras API / Selenium Plugin。搜索结果只在本轮请求中临时进入模型，不会生成聊天楼层、附件或 Data Bank 文件。
+            <div class="hwr_intro hwr_intro_compact">
+                按需搜索并将资料临时交给当前模型，不生成聊天楼层。
             </div>
 
             <label class="checkbox_label" for="hwr_enabled">
                 <input type="checkbox" id="hwr_enabled">
-                <span>启用隐藏联网研究</span>
+                <span>启用插件</span>
             </label>
 
-            <label for="hwr_research_backend">联网模式</label>
+            <div class="hwr_status_row">
+                <div id="hwr_status" data-state="idle">已关闭</div>
+            </div>
+
+            <label for="hwr_research_backend">搜索来源</label>
             <select id="hwr_research_backend" class="text_pole">
                 <option value="searxng">本机 SearXNG（适用于所有模型，推荐）</option>
                 <option value="serpapi">SerpAPI Google（适用于所有模型）</option>
@@ -30,7 +34,7 @@
                 -->
             </select>
             <div class="hwr_hint">
-                本扩展不提供 Z.AI 搜索来源。Extras API 与 Selenium Plugin 是可选兼容路径，不影响其他来源独立使用。
+                本扩展不提供 Z.AI；选择来源后可在下方“当前来源配置”中测试连接。
             </div>
 
             <div id="hwr_adapter_block">
@@ -50,10 +54,8 @@
                     </button>
                 </div>
                 <div id="hwr_resolved_adapter" class="hwr_hint"></div>
-                <div class="hwr_notice">
-                    这里决定三件事：模糊场景如何判断是否值得搜索、怎样组织与补充查询、当前模型最后怎样使用证据回答；它不是联网总开关，也不会把当前模型替换成 Claude 或 Gemini，更不会调用厂商官方搜索服务。
-                    Claude 启发先判断外部证据是否真正必要，再逐个查证缺口并克制引用；Gemini 启发先判断搜索能否改善正确性、时效性或可验证性，再把信息需求提炼成高意图查询并逐段 Grounding。
-                    DeepSeek V4 Pro、GLM 5.2 与 Kimi K3 分别强调分面合并、层级核验与研究收敛。策略推荐总查询数分别为 Claude 3、Gemini 4、V4 Pro 4、GLM 5.2 4、Kimi K3 3、通用 3；它们只是经济性建议，实际每轮与总查询硬上限完全由“高级限制”中的数值决定。
+                <div class="hwr_hint">
+                    只改变如何判断、规划查询和使用证据，不会切换当前回答模型或调用厂商官方搜索。
                 </div>
                 <details class="hwr_prompt_editor">
                     <summary>自定义查询规划与最终回答策略</summary>
@@ -155,50 +157,33 @@
                             <span>测试副规划器（会调用一次 API）</span>
                         </button>
                     </div>
-                    <div class="hwr_notice">
-                        Key 只写入当前 SillyTavern 用户的服务端 secrets，不写入扩展设置、聊天记录或浏览器存储，也不会回显。扩展设置只保存配置名称、URL、模型和对应的 secret ID。
-                        切换已保存配置只会改变下一次规划请求引用的 secret ID，不会轮换酒馆的活动 Custom Key。
+                    <div class="hwr_hint">
+                        Key 只写入 SillyTavern 服务端 secrets，不写入扩展设置、聊天或浏览器存储。
                     </div>
-                    <div class="hwr_notice hwr_warning">
-                        原版酒馆的 secrets 写入接口会把刚保存的新 Key 标为活动；若原先已有活动 Custom Key，插件只会在未检测到其他页面或扩展介入时恢复它。若原先整个 Custom Key 槽为空，新 Key 将持续成为酒馆全局活动 Custom Key：插件不会改变主模型 URL 或模型，但以后未指定 <code>secret-id</code> 的 Custom 请求可能使用这把规划 Key。首次空槽保存会单独二次确认。保存动作期间不要在另一标签页同时生成、保存或轮换 Custom Key；需要完全避开共享密钥槽副作用时，请使用合适来源的 Connection Manager Profile。保存和删除事务会短时锁定当前标签页的发送、继续、重生成、滑动与停止入口（纯元数据修改也一样）。写 Key 的窗口内，本页走酒馆 <code>CHAT_COMPLETION_SETTINGS_READY</code> 管线且没有显式 <code>secret-id</code> 的 Custom 请求（包括后台 <code>generateRaw()</code>）会被指定到一个随机不存在的 ID，因此请求会失败而不会误用瞬时规划 Key；状态不明时该保护与发送锁会保持到刷新。其他标签页仍无法锁定；同源扩展若绕过事件管线直接 <code>fetch</code>，或预先捕获并自行调用更底层的原函数，也属于同一信任边界，无法由本扩展可靠封锁。请只安装可信扩展；若活动 Custom Key 无法安全确认，请先检查酒馆密钥管理器再刷新页面。
-                    </div>
-                    <div class="hwr_notice hwr_warning">
-                        独立保存和切换多把直连 Key 需要 SillyTavern 1.18.0 或更高版本；1.13.3–1.17.x 请改用上方 Connection Manager Profile。只有 Anthropic <code>/messages</code> 或 Gemini <code>generateContent</code> 协议、且没有 OpenAI 兼容接口的渠道，也请使用 Connection Profile。
-                    </div>
+                    <details class="hwr_subdetails">
+                        <summary>直连 Key 安全与版本说明</summary>
+                        <div class="hwr_notice hwr_warning">独立直连配置需要 SillyTavern 1.18.0+。保存时原版酒馆可能短暂切换活动 Custom Key；请勿跨标签页同时生成或轮换 Key，只安装可信扩展。需要完全避开共享密钥槽影响时请使用 Connection Profile。</div>
+                    </details>
                 </div>
                 <label class="checkbox_label" for="hwr_planner_fallback_current">
                     <input type="checkbox" id="hwr_planner_fallback_current">
                     <span>副 API 失败时，本轮后续规划回退当前回答模型（推荐）</span>
                 </label>
                 <div id="hwr_resolved_planner_connection" class="hwr_hint"></div>
-                <div class="hwr_notice">
-                    副 API 只执行隐藏的 SEARCH / DONE 判断、查询词规划、补搜和资料充分性评估；真正的网页搜索仍由上方选择的搜索来源完成，最终正文始终使用当前回答模型。副 API 会收到本轮用户请求、设置范围内的最近聊天以及已取得的搜索摘要。每次规划仍是独立模型调用，只是费用和负载转移到所选副 API。
-                    Connection Profile 模式只保存 Profile ID，直连模式只保存非敏感连接元数据和服务端 secret ID；两种方式都不会切换当前回答的来源、Profile、URL 或模型。直连首次写入空 Custom 密钥槽时会改变全局活动 Custom credential，详见上方警告。插件不向副 API 提交搜索工具，同时显式关闭 SillyTavern 的原生联网开关；如果模型名称（例如 <code>:online</code>）、模型本身或中转网关强制联网，前端插件无法禁止，可能另行产生搜索费用。
-                    只应使用可信的 Profile 和 HTTPS 端点。扩展无法替你审计中转服务器；Connection Manager、Proxy Preset 与同源第三方扩展属于同一前端信任域。
-                </div>
-                <div class="hwr_warning">
-                    SillyTavern 1.13.3–1.17.x 可以独立选择 Connection Profile 的来源、URL 和模型，但请求使用该 SillyTavern Chat Completion 来源当前激活的密钥槽；从 1.18.0 起才会按 Profile 精确选择独立 <code>secret-id</code>。旧版需要不同 Key 时，请让副规划器使用另一来源，或把规划 Key 设为对应来源的当前激活 Key。Reverse Proxy Preset 的密码是例外，由酒馆自身的 Proxy Preset 设置机制管理。
+                <div class="hwr_hint">
+                    副 API 只负责判断和规划查询；网页搜索仍由所选来源执行，最终正文始终由当前回答模型生成。
                 </div>
             </div>
 
+            <div id="hwr_result_behavior_block" class="hwr_compact_group">
             <label for="hwr_result_transport">搜索结果注入方式</label>
             <select id="hwr_result_transport" class="text_pole">
                 <option value="auto">自动：隐藏工具结果优先（推荐）</option>
                 <option value="prompt">固定使用隐藏研究包（最高兼容）</option>
             </select>
             <div id="hwr_resolved_transport" class="hwr_hint"></div>
-            <div class="hwr_notice">
-                自动模式会在酒馆确认当前连接支持函数调用时，把已完成的搜索重构为仅本轮请求可见的
-                <code>hwr_web_search</code> 工具调用与工具结果；Claude、Gemini 与 OpenAI 兼容来源会由酒馆转换为各自的普通客户端工具协议。
-                本轮只综合已有结果，不再开放其他函数工具，也会强制关闭厂商原生联网搜索，避免重复搜索和测试污染。
-                若函数调用关闭、消息协议不兼容或无法安全定位本轮研究内容，会保留隐藏研究包。
-                SillyTavern 1.13.3–1.14.x 尚不能对 Gemini 最终综合请求可靠强制“禁止再次调用工具”，因此这些版本的 Gemini 会自动使用隐藏研究包；1.15.0 及以上仅对 Gemini 3 保守回退。
-                Claude、DeepSeek 与其他兼容来源仍可在支持函数调用时使用隐藏工具结果。
-                Extras API 与 Selenium Plugin 只返回无法逐条归因的聚合内容，因此无论这里选择哪一项，都强制使用中性聚合研究包。
-            </div>
             <div class="hwr_hint">
-                自动兼容回退发生在请求发送前；若某个中转错误宣称支持工具、但上游发送后才返回协议错误，前端扩展无法在同一轮透明重发。
-                遇到这种渠道时请选择“固定使用隐藏研究包”。
+                自动模式优先使用隐藏工具历史，不兼容时回退隐藏研究包；使用 No Tools 的连接建议固定隐藏研究包。
             </div>
 
             <label for="hwr_search_policy">触发策略</label>
@@ -208,8 +193,8 @@
                 <option value="explicit">仅在用户明确要求联网时搜索（其他消息本地跳过）</option>
             </select>
             <div class="hwr_hint">
-                触发策略回答“这一轮是否进入研究流程”。“模型自动判断”会调用上方选择的隐藏规划器（默认当前回答模型）：明确搜索、天气、时效信息和推荐等高置信场景由本地门控保证至少搜索一次，其余模糊场景由上面的模型策略判断；即使最后不搜索也会消耗规划 tokens。
-                “每条消息”仍会让规划器先组织查询，但至少执行一次搜索；明确禁止联网和只问本机日期/时间是例外。“仅明确要求联网”会在其他消息上本地零 token 跳过。当前用户明确要求“不联网”始终优先于全部选项。
+                自动判断可能消耗一次规划 API；“仅明确要求联网”可在其他消息上零 token 跳过。明确“不联网”始终优先。
+            </div>
             </div>
             <details class="hwr_prompt_editor">
                 <summary>自定义触发判断提示词</summary>
@@ -566,8 +551,8 @@
                 <span>对可逐条归因的结果保留真实 URL，并要求最终回答使用 Markdown 引用</span>
             </label>
 
-            <details class="hwr_advanced">
-                <summary>高级限制</summary>
+            <details id="hwr_advanced_section" class="hwr_section hwr_advanced">
+                <summary><span class="hwr_summary_title">高级限制与调试</span><span id="hwr_advanced_summary" class="hwr_summary_meta"></span></summary>
                 <div class="hwr_grid">
                     <label for="hwr_max_rounds">最多规划轮数</label>
                     <input id="hwr_max_rounds" class="text_pole" type="number" min="1" max="5">
@@ -603,18 +588,16 @@
                     <input id="hwr_reuse_seconds" class="text_pole" type="number" min="0" max="3600" step="60">
                 </div>
                 <div class="hwr_hint">
-                    复用时间适用于当前选择的搜索来源；缓存只保存在本页内存中，并按来源及其非敏感配置隔离。
-                </div>
-                <div class="hwr_hint">
-                    “规划器 tokens”是通用下限；模型专属提示策略会覆盖较小值：DeepSeek V4 Pro 1024、GLM 5.2 1536、Kimi K3 2048。私有 hwr_planner_profile 服务端标记当前暂停；普通请求参数是否生效由原版酒馆和上游决定。
-                </div>
-                <div class="hwr_hint">
-                    “每轮最多查询”“总查询上限”和“最多规划轮数”是实际执行硬上限；模型策略中的数量只是推荐，不会再暗中压低你填写的数值。
+                    这里的轮数、查询数和证据长度是实际执行上限；缓存仅保存在当前页面内存中。
                 </div>
                 <div class="hwr_button_row">
                     <button id="hwr_restore_advanced_defaults" class="menu_button" type="button">
                         <i class="fa-solid fa-rotate-left"></i>
                         <span>恢复高级限制默认值</span>
+                    </button>
+                    <button id="hwr_clear_cache" class="menu_button" type="button">
+                        <i class="fa-solid fa-broom"></i>
+                        <span>清理内存缓存</span>
                     </button>
                 </div>
                 <label class="checkbox_label" for="hwr_debug">
@@ -623,17 +606,16 @@
                 </label>
             </details>
 
-            <div class="hwr_footer">
-                <div id="hwr_status" data-state="idle">已关闭</div>
-                <button id="hwr_clear_cache" class="menu_button" type="button">
-                    <i class="fa-solid fa-broom"></i>
-                    <span>清理内存缓存</span>
-                </button>
-            </div>
 
-            <div class="hwr_privacy">
-                隐私说明：所有来源的研究内容都不会写入聊天文件、附件、Data Bank、LocalStorage 或 IndexedDB，但搜索词会发送给所选服务；KoboldCpp、Extras API 与 Selenium Plugin 会发往你配置的对应实例或组件，证据会临时进入最终回答模型的请求上下文。SerpAPI、Tavily 与 Serper Key 使用当前 SillyTavern 用户的共享服务端 secrets，直连规划 Key 使用 Custom 服务端 secrets，均不写入扩展设置或聊天。若选择 Connection Profile 或直连副 API，本轮用户请求、设置范围内的最近聊天及搜索摘要还会发送给该规划服务。Extras/Selenium 的候选链接不具备逐条事实归因能力。本扩展调试日志不打印搜索正文；原版酒馆及可选组件仍可能按各自日志策略记录请求。
-            </div>
+            <details id="hwr_help_section" class="hwr_section hwr_help">
+                <summary><span class="hwr_summary_title">兼容性、隐私与技术说明</span><span class="hwr_summary_meta">版本与数据边界</span></summary>
+                <div class="hwr_section_body hwr_privacy">
+                    <p>兼容 SillyTavern 1.13.3 及以上版本（已验证 1.13.3–1.18.x）。直填多组副 API Key 需要 1.18.0+；旧版请使用 Connection Profile。</p>
+                    <p>搜索资料只临时进入本轮模型请求，不写入聊天、附件、Data Bank、LocalStorage 或 IndexedDB；搜索词及必要上下文会发送给你选择的搜索服务和规划 API。</p>
+                    <p>SerpAPI、Tavily、Serper 与直连规划 Key 存在 SillyTavern 服务端 secrets 中。插件调试日志不打印搜索正文，但原版酒馆、外部来源或可选组件可能按各自策略记录请求。</p>
+                    <p>自动注入会优先使用隐藏工具历史；协议不兼容时改用中性隐藏研究包。Extras 与 Selenium 只能提供未逐条归因的聚合资料，因此始终使用研究包。</p>
+                </div>
+            </details>
         </div>
     </div>
 </div>

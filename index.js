@@ -453,6 +453,7 @@ function updateSearchApiCredentialStatus(provider, overrideText = '') {
         'placeholder',
         activeSecret ? '已保存；留空不会替换 Key' : provider === 'anysearch' ? '可留空使用匿名模式' : `输入 ${definition.label} Key`,
     );
+    updateSettingsSectionSummaries();
 }
 
 async function saveSearchApiKey(provider) {
@@ -1304,6 +1305,159 @@ function updateStatus(state, text) {
     if (!status.length) return;
     status.attr('data-state', state);
     status.text(text);
+    if (state === 'error') {
+        const target = /规划|副 API/u.test(String(text)) ? 'hwr_planner_section' : 'hwr_source_section';
+        openSettingsSection(target);
+    }
+}
+
+function createSettingsSection(id, title, summaryId) {
+    const details = $('<details>')
+        .attr('id', id)
+        .addClass('hwr_section');
+    const summary = $('<summary>');
+    summary.append($('<span>').addClass('hwr_summary_title').text(title));
+    summary.append(
+        $('<span>')
+            .attr('id', summaryId)
+            .addClass('hwr_summary_meta')
+            .attr('aria-live', 'polite'),
+    );
+    details.append(summary, $('<div>').addClass('hwr_section_body'));
+    return details;
+}
+
+function initializeSettingsLayout() {
+    const anchor = $('#hwr_research_backend').next('.hwr_hint');
+    if (!anchor.length || $('#hwr_source_section').length) return;
+
+    const sections = [
+        createSettingsSection('hwr_source_section', '当前来源配置', 'hwr_source_summary'),
+        createSettingsSection('hwr_behavior_section', '研究行为与结果注入', 'hwr_behavior_summary'),
+        createSettingsSection('hwr_planner_section', '隐藏搜索规划 API', 'hwr_planner_summary'),
+        createSettingsSection('hwr_custom_prompts_section', '自定义提示词', 'hwr_custom_prompts_summary'),
+    ];
+
+    let cursor = anchor;
+    for (const section of sections) {
+        section.insertAfter(cursor);
+        cursor = section;
+    }
+
+    const sourceBody = $('#hwr_source_section > .hwr_section_body');
+    for (const backend of ['searxng', 'serpapi', 'tavily', 'serper', 'koboldcpp', 'extras', 'selenium']) {
+        sourceBody.append($('#hwr_' + backend + '_settings'));
+    }
+
+    const behaviorBody = $('#hwr_behavior_section > .hwr_section_body');
+    behaviorBody.append($('#hwr_adapter_block'));
+    behaviorBody.append($('#hwr_result_behavior_block'));
+    behaviorBody.append($('#hwr_source_links_label'));
+
+    $('#hwr_planner_section > .hwr_section_body').append($('#hwr_planner_connection_settings'));
+
+    const customBody = $('#hwr_custom_prompts_section > .hwr_section_body');
+    customBody.append($('#hwr_strategy_custom_prompt').closest('.hwr_prompt_editor'));
+    customBody.append($('#hwr_trigger_custom_prompt').closest('.hwr_prompt_editor'));
+
+    updateSettingsSectionSummaries();
+}
+
+function openSettingsSection(id) {
+    const section = document.getElementById(id);
+    if (section instanceof HTMLDetailsElement) section.open = true;
+}
+
+function getSourceSectionState(settings = getSettings()) {
+    const backend = settings.researchBackend;
+    const label = getSearchBackendLabel(backend);
+    if (['serpapi', 'tavily', 'serper'].includes(backend)) {
+        const ready = Boolean(getActiveSearchApiSecret(backend));
+        return { label, text: ready ? 'Key 已保存' : '缺少 Key', missing: !ready };
+    }
+    if (backend === 'koboldcpp') {
+        const ready = Boolean(getKoboldCppConfig().baseUrl);
+        return { label, text: ready ? '已继承 URL' : '缺少 URL', missing: !ready };
+    }
+    if (backend === 'extras') {
+        const config = getBrowserSearchConfig('extras', settings);
+        const ready = Array.isArray(modules) && modules.includes('websearch') && Boolean(config.apiUrl);
+        return { label, text: ready ? '兼容模式' : '未配置', missing: !ready };
+    }
+    if (backend === 'selenium') {
+        const checked = seleniumProbeState.checkedAt > 0;
+        const ready = checked && seleniumProbeState.available;
+        return {
+            label,
+            text: ready ? '插件可用' : checked ? '插件不可用' : '需要 server plugin',
+            missing: !ready,
+        };
+    }
+    return {
+        label,
+        text: settings.searxngUrl ? '自定义地址' : '继承设置 / 本机',
+        missing: false,
+    };
+}
+
+function updateSettingsSectionSummaries({ openMissing = false, openSource = false } = {}) {
+    if (!$('#hwr_source_summary').length) return;
+    const settings = getSettings();
+    const source = getSourceSectionState(settings);
+    $('#hwr_source_summary').text(source.label + ' · ' + source.text);
+
+    const policyLabels = {
+        auto: '自动判断',
+        always: '每条消息',
+        explicit: '仅明确要求',
+    };
+    const strategyText = String($('#hwr_adapter option:selected').text() || '自动识别')
+        .split('：')[0]
+        .trim();
+    const aggregateBackend = ['extras', 'selenium'].includes(settings.researchBackend);
+    const transportText = settings.resultTransport === 'prompt' || aggregateBackend
+        ? '隐藏研究包'
+        : isClientToolTransportSupported() ? '工具结果优先' : '自动研究包';
+    $('#hwr_behavior_summary').text(
+        (policyLabels[settings.searchPolicy] || '自动判断') + ' · ' + strategyText + ' · ' + transportText,
+    );
+
+    let plannerText = '当前回答模型';
+    let plannerMissing = false;
+    if (settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.PROFILE) {
+        const availableProfiles = getPlannerProfileService()?.getSupportedProfiles() || [];
+        const selectedAvailable = availableProfiles.some(profile => profile.id === settings.plannerProfileId);
+        plannerMissing = !settings.plannerProfileId || !selectedAvailable;
+        plannerText = plannerMissing
+            ? settings.plannerProfileId ? 'Profile 不可用' : 'Profile 未选择'
+            : 'Connection Profile';
+    } else if (settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.DIRECT) {
+        const profile = getPlannerDirectProfileMetadata(settings);
+        const ready = isPlannerDirectConnectionSupported()
+            && profile
+            && plannerDirectSecretExists(profile.secretId);
+        plannerMissing = !ready;
+        plannerText = ready ? profile.name : '直连未配置';
+    }
+    $('#hwr_planner_summary').text(plannerText);
+
+    const enabledPrompts = [
+        settings.strategyCustomPromptEnabled && settings.strategyCustomPrompt,
+        settings.triggerCustomPromptEnabled && settings.triggerCustomPrompt,
+    ].filter(Boolean).length;
+    const hasDraft = Boolean(settings.strategyCustomPrompt || settings.triggerCustomPrompt);
+    const hasDirtyPrompt = $('.hwr_prompt_status[data-state="dirty"], .hwr_prompt_status[data-state="error"]').length > 0;
+    const promptText = enabledPrompts
+        ? '已启用 ' + enabledPrompts + ' 项'
+        : hasDraft ? '有未启用草稿' : '均未启用';
+    $('#hwr_custom_prompts_summary').text(promptText + (hasDirtyPrompt ? ' · 有未保存修改' : ''));
+
+    $('#hwr_advanced_summary').text(
+        settings.maxRounds + ' 轮 · 最多 ' + settings.maxTotalQueries + ' 次查询',
+    );
+
+    if (openSource || (openMissing && source.missing)) openSettingsSection('hwr_source_section');
+    if (openMissing && plannerMissing) openSettingsSection('hwr_planner_section');
 }
 
 function debugLog(...args) {
@@ -1408,6 +1562,7 @@ function updateResolvedAdapterLabel() {
     const resolved = detectAdapter();
     const profile = getResearchStrategyProfile(resolved);
     const settings = getSettings();
+    updateSettingsSectionSummaries();
     const effectiveMaximum = Math.min(settings.maxTotalQueries, settings.maxRounds * settings.maxQueriesPerRound);
     $('#hwr_resolved_adapter').text(
         `当前识别：${source}${model ? ` / ${model}` : ''} → ${getResearchStrategyLabel(resolved)}；策略建议首轮 ${profile.firstRoundQueryLimit}、后续 ${profile.followUpQueryLimit}、总计 ${profile.totalQueryLimit}；高级硬上限最多 ${effectiveMaximum} 次（${settings.maxRounds} 轮 × 每轮 ${settings.maxQueriesPerRound}，总上限 ${settings.maxTotalQueries}）`,
@@ -1442,10 +1597,11 @@ function updateResolvedTransportLabel() {
         ? '当前注入：该旧式来源只提供未逐条归因的聚合摘要，固定使用隐藏研究包'
         : transport === 'tool'
             ? '当前注入：隐藏客户端工具结果（最终请求会禁用厂商原生搜索与后续工具调用）'
-        : settings.resultTransport === 'prompt'
+            : settings.resultTransport === 'prompt'
             ? '当前注入：固定使用隐藏研究包'
             : '当前注入：工具消息转换不安全或函数调用不可用，自动使用隐藏研究包';
     $('#hwr_resolved_transport').text(text);
+    updateSettingsSectionSummaries();
 }
 
 function getPlannerRequestTuning(adapter) {
@@ -3653,6 +3809,7 @@ function updateCustomPromptDraftStatus(kind) {
     } else {
         setCustomPromptStatus(definition, 'default', '正在使用当前版本的内置默认规则。');
     }
+    updateSettingsSectionSummaries();
 }
 
 function setCustomPromptButtonsDisabled(definition, disabled) {
@@ -3809,7 +3966,7 @@ function bindNumberSetting(selector, key) {
     });
 }
 
-function switchBackendUi() {
+function switchBackendUi({ openSource = false } = {}) {
     const backend = getSettings().researchBackend;
     $('#hwr_searxng_settings').toggle(backend === 'searxng');
     $('#hwr_serpapi_settings').toggle(backend === 'serpapi');
@@ -3823,6 +3980,7 @@ function switchBackendUi() {
     $('#hwr_gemini_profile_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'gemini_profile');
     $('#hwr_source_links_label').toggle(backend !== 'gemini_profile');
     const usesHiddenPlanner = RESEARCH_BACKENDS.has(backend);
+    updateSettingsSectionSummaries({ openSource });
     $('#hwr_adapter_block').toggle(usesHiddenPlanner);
     $('#hwr_planner_connection_settings').toggle(usesHiddenPlanner);
     updateResolvedTransportLabel();
@@ -5063,6 +5221,7 @@ function getPlannerProfileDisplayLabel(profile) {
 }
 
 function updatePlannerConnectionUi(profiles = null) {
+    updateSettingsSectionSummaries();
     const settings = getSettings();
     const profileMode = settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.PROFILE;
     const directMode = settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.DIRECT;
@@ -5198,6 +5357,8 @@ async function testStructuredSearchConnection(backend) {
     } catch (error) {
         updateStatus('error', `${label} 测试失败：${error.message || error}`);
         toastr.error(String(error.message || error), `${label} 测试失败`);
+    } finally {
+        updateSettingsSectionSummaries();
     }
 }
 
@@ -5343,6 +5504,7 @@ function bindSettingsUi() {
         settings.searchPolicy = String($(this).val());
         normalizeSettings(settings);
         invalidateRun('Search policy changed');
+        updateSettingsSectionSummaries();
         saveSettingsDebounced();
     });
     bindCustomPromptUi('strategy');
@@ -5352,13 +5514,14 @@ function bindSettingsUi() {
         normalizeSettings(settings);
         $(this).val(settings.researchBackend);
         invalidateRun('Research backend changed');
-        switchBackendUi();
+        switchBackendUi({ openSource: true });
         saveSettingsDebounced();
     });
     $('#hwr_searxng_url').val(settings.searxngUrl).on('change', function () {
         settings.searxngUrl = String($(this).val()).trim();
         invalidateRun('SearXNG URL changed');
         saveSettingsDebounced();
+        updateSettingsSectionSummaries();
     });
     $('#hwr_searxng_preferences').val(settings.searxngPreferences).on('change', function () {
         settings.searxngPreferences = String($(this).val()).trim();
@@ -5526,6 +5689,7 @@ function bindSettingsUi() {
     refreshPlannerProfiles();
     refreshPlannerDirectProfilesUi();
     updateResolvedAdapterLabel();
+    updateSettingsSectionSummaries({ openMissing: true });
     updateResolvedTransportLabel();
     switchBackendUi();
     if (pausedBackendMigration) {
@@ -5590,6 +5754,7 @@ jQuery(async () => {
     await readSecretState();
     const html = await renderExtensionTemplateAsync(EXTENSION_ID, 'settings');
     $('#extensions_settings2').append(html);
+    initializeSettingsLayout();
     bindSettingsUi();
     if (ENABLE_SERVER_DEPENDENT_FEATURES) {
         const context = SillyTavern.getContext();

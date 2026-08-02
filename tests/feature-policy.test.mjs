@@ -95,11 +95,13 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.11.0');
+assert.equal(manifest.version, '1.12.0');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
 assert.match(visibleSettingsHtml, /<b>P1G搜（颜料搜）<\/b>/u);
+assert.match(visibleSettingsHtml, /<span>启用插件<\/span>/u);
+assert.doesNotMatch(visibleSettingsHtml, /启用隐藏联网研究/u);
 assert.match(indexSource, /const DISPLAY_NAME = 'P1G搜（颜料搜）'/u);
 assert.match(indexSource, /const EXTENSION_ID = 'third-party\/Extension-HiddenWebResearch'/u);
 assert.match(indexSource, /const SETTINGS_KEY = 'hiddenWebResearch'/u);
@@ -307,7 +309,6 @@ assert.match(indexSource, /String\(request\.type \|\| ''\) !== String\(pending\.
 assert.match(indexSource, /request\.messages\.findLast/u);
 assert.match(indexSource, /message\?\.name !== 'example_user'/u);
 assert.match(indexSource, /typeof item\.content === 'string'/u);
-assert.match(visibleSettingsHtml, /1\.13\.3–1\.14\.x 尚不能对 Gemini/u);
 assert.match(indexSource, /request\.enable_web_search = false/u);
 assert.match(
     indexSource,
@@ -367,7 +368,7 @@ for (const backend of publicBackends) {
     );
 }
 assert.doesNotMatch(visibleSettingsHtml, /<option value="zai">/u);
-assert.match(visibleSettingsHtml, /\u672c\u6269\u5c55\u4e0d\u63d0\u4f9b Z\.AI \u641c\u7d22\u6765\u6e90/u);
+assert.match(visibleSettingsHtml, /\u672c\u6269\u5c55\u4e0d\u63d0\u4f9b Z\.AI/u);
 assert.equal((visibleSettingsHtml.match(/\u4e0d\u5f97\u4f2a\u9020\u9010\u6761\u5f15\u7528/gu) || []).length, 2);
 assert.doesNotMatch(indexSource, /\/api\/search\/zai|SECRET_KEYS\.ZAI|researchBackend === 'zai'/iu);
 assert.match(visibleSettingsHtml, /for="hwr_adapter">[^<]+<\/label>/u);
@@ -428,8 +429,28 @@ for (const backend of ['tavily', 'serper', 'koboldcpp', 'extras', 'selenium']) {
 assert.match(indexSource, /#hwr_extras_engine'\)\.val\(settings\.extrasEngine\)\.on\('change'/u);
 assert.match(indexSource, /#hwr_selenium_engine'\)\.val\(settings\.seleniumEngine\)\.on\('change'/u);
 assert.match(visibleSettingsHtml, /maxlength="4000"/u);
-assert.match(visibleSettingsHtml, /实际每轮与总查询硬上限完全由“高级限制”中的数值决定/u);
-assert.match(visibleSettingsHtml, /DeepSeek[^<]+Claude[^<]+API[^<]+DeepSeek/u);
+for (const [id, title, summaryId] of [
+    ['hwr_source_section', '当前来源配置', 'hwr_source_summary'],
+    ['hwr_behavior_section', '研究行为与结果注入', 'hwr_behavior_summary'],
+    ['hwr_planner_section', '隐藏搜索规划 API', 'hwr_planner_summary'],
+    ['hwr_custom_prompts_section', '自定义提示词', 'hwr_custom_prompts_summary'],
+]) {
+    assert.match(
+        indexSource,
+        new RegExp(`createSettingsSection\\('${id}', '${title}', '${summaryId}'\\)`, 'u'),
+    );
+}
+for (const id of ['hwr_advanced_section', 'hwr_help_section']) {
+    assert.match(visibleSettingsHtml, new RegExp(`<details id="${id}" class="hwr_section`, 'u'));
+}
+const initializeSettingsLayoutCall = indexSource.lastIndexOf('initializeSettingsLayout();');
+const bindSettingsUiCall = indexSource.lastIndexOf('bindSettingsUi();');
+assert.ok(initializeSettingsLayoutCall >= 0);
+assert.ok(bindSettingsUiCall > initializeSettingsLayoutCall);
+assert.match(indexSource, /availableProfiles\.some\(profile => profile\.id === settings\.plannerProfileId\)/u);
+assert.match(indexSource, /if \(openSource \|\| \(openMissing && source\.missing\)\) openSettingsSection\('hwr_source_section'\)/u);
+assert.match(indexSource, /if \(openMissing && plannerMissing\) openSettingsSection\('hwr_planner_section'\)/u);
+assert.match(indexSource, /const target = \/规划\|副 API\/u\.test\(String\(text\)\) \? 'hwr_planner_section' : 'hwr_source_section'/u);
 assert.match(indexSource, /bindCustomPromptUi\('strategy'\)/u);
 assert.match(indexSource, /bindCustomPromptUi\('trigger'\)/u);
 assert.match(indexSource, /restoreCustomPromptDefaults/u);
