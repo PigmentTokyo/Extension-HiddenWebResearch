@@ -66,7 +66,7 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.8.4');
+assert.equal(manifest.version, '1.9.0');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -77,7 +77,7 @@ assert.match(indexSource, /const SETTINGS_KEY = 'hiddenWebResearch'/u);
 assert.match(indexSource, /const PROMPT_KEY = '___HiddenWebResearch___'/u);
 assert.match(readme, /^# P1G搜（颜料搜） for SillyTavern$/mu);
 assert.match(readme, /https:\/\/github\.com\/PigmentTokyo\/Extension-HiddenWebResearch/u);
-assert.match(indexSource, /schemaVersion:\s*9/u);
+assert.match(indexSource, /schemaVersion:\s*10/u);
 assert.match(indexSource, /strategyCustomPromptEnabled:\s*false/u);
 assert.match(indexSource, /strategyCustomPrompt:\s*''/u);
 assert.match(indexSource, /triggerCustomPromptEnabled:\s*false/u);
@@ -275,7 +275,7 @@ for (const id of [
 }
 assert.match(visibleSettingsHtml, /maxlength="4000"/u);
 assert.match(visibleSettingsHtml, /实际每轮与总查询硬上限完全由“高级限制”中的数值决定/u);
-assert.match(visibleSettingsHtml, /当前回答模型是 DeepSeek 而手选 Claude，仍由 DeepSeek 执行/u);
+assert.match(visibleSettingsHtml, /DeepSeek[^<]+Claude[^<]+API[^<]+DeepSeek/u);
 assert.match(indexSource, /bindCustomPromptUi\('strategy'\)/u);
 assert.match(indexSource, /bindCustomPromptUi\('trigger'\)/u);
 assert.match(indexSource, /restoreCustomPromptDefaults/u);

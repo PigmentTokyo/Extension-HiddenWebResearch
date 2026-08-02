@@ -39,6 +39,16 @@ import {
     normalizeCustomPrompt,
 } from './planner-prompts.js';
 import {
+    fallbackPlannerToCurrent,
+    listPlannerProfiles,
+    normalizePlannerConnectionMode,
+    PLANNER_CONNECTION_MODES,
+    PLANNER_REQUEST_TIMEOUT_REASON,
+    requestHiddenPlanner,
+    resolvePlannerRequestMode,
+    raceTaskWithAbortSignal,
+} from './planner-request-router.js';
+import {
     buildSafeFallbackQuery,
     containsSensitiveQueryMaterial,
 } from './query-safety.js';
@@ -110,7 +120,7 @@ const CONNECTION_MODES = new Set(['profile', 'direct']);
 const HANDLED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe']);
 
 const defaultSettings = {
-    schemaVersion: 9,
+    schemaVersion: 10,
     enabled: false,
     adapter: 'auto',
     searchPolicy: 'auto',
@@ -118,6 +128,9 @@ const defaultSettings = {
     strategyCustomPrompt: '',
     triggerCustomPromptEnabled: false,
     triggerCustomPrompt: '',
+    plannerConnectionMode: PLANNER_CONNECTION_MODES.CURRENT,
+    plannerProfileId: '',
+    plannerFallbackToCurrent: true,
     researchBackend: 'searxng',
     searxngUrl: '',
     searxngPreferences: '',
@@ -236,6 +249,9 @@ function normalizeSettings(settings) {
 
     if (!ADAPTERS.has(settings.adapter)) setValue('adapter', defaultSettings.adapter);
     if (!SEARCH_POLICIES.has(settings.searchPolicy)) setValue('searchPolicy', defaultSettings.searchPolicy);
+    setValue('plannerConnectionMode', normalizePlannerConnectionMode(settings.plannerConnectionMode));
+    setValue('plannerProfileId', String(settings.plannerProfileId || ''));
+    setValue('plannerFallbackToCurrent', Boolean(settings.plannerFallbackToCurrent));
     const strategyCustomPrompt = normalizeCustomPrompt(settings.strategyCustomPrompt);
     const triggerCustomPrompt = normalizeCustomPrompt(settings.triggerCustomPrompt);
     setValue('strategyCustomPrompt', strategyCustomPrompt);
@@ -1329,11 +1345,11 @@ function getPlannerRequestTuning(adapter) {
 
 function applyPlannerRequestTuning(request, adapter) {
     if (!request || typeof request !== 'object') return;
+    const plannerSentinel = `HWR_INTERNAL_PLANNER_PROFILE=${adapter}`;
+    if (!JSON.stringify(request.messages || '').includes(plannerSentinel)) return;
     disableVendorNativeSearch(request);
     const tuning = getPlannerRequestTuning(adapter);
     if (!tuning) return;
-    const plannerSentinel = `HWR_INTERNAL_PLANNER_PROFILE=${adapter}`;
-    if (!JSON.stringify(request.messages || '').includes(plannerSentinel)) return;
     // The private hwr_planner_profile request field remains paused; this local sentinel only scopes request tuning.
     if (ENABLE_SERVER_DEPENDENT_FEATURES) {
         request.hwr_planner_profile = adapter;
@@ -1351,6 +1367,66 @@ function applyPlannerRequestTuning(request, adapter) {
         delete request.min_p;
         delete request.top_a;
         delete request.repetition_penalty;
+    }
+}
+
+function getPlannerProfileService() {
+    const context = SillyTavern.getContext();
+    const service = context.ConnectionManagerRequestService;
+    if (!service || typeof service.sendRequest !== 'function') return null;
+    return {
+        getSupportedProfiles: () => listPlannerProfiles(service).filter(profile =>
+            context.CONNECT_API_MAP?.[profile.api]?.selected === 'openai',
+        ),
+        sendRequest: service.sendRequest.bind(service),
+    };
+}
+
+function getPlannerProfileFingerprint(settings) {
+    if (settings.plannerConnectionMode !== PLANNER_CONNECTION_MODES.PROFILE) {
+        return { mode: PLANNER_CONNECTION_MODES.CURRENT };
+    }
+    const service = getPlannerProfileService();
+    const profile = service?.getSupportedProfiles().find(item => item.id === settings.plannerProfileId);
+    return {
+        mode: PLANNER_CONNECTION_MODES.PROFILE,
+        id: settings.plannerProfileId,
+        api: String(profile?.api || ''),
+        model: String(profile?.model || ''),
+        endpoint: String(profile?.['api-url'] || ''),
+    };
+}
+
+function getPlannerProfileOverridePayload() {
+    return {
+        enable_web_search: false,
+        n: 1,
+    };
+}
+
+async function generatePlannerWithCurrent({ adapter, generateOptions, queryLimit, evaluationOnly }) {
+    const requestTuningHook = request => applyPlannerRequestTuning(request, adapter);
+    const canTuneRequest = CLIENT_COMPATIBILITY.requestRewrite;
+    if (canTuneRequest) {
+        eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+    }
+    try {
+        if (adapter === 'kimi-k3') {
+            try {
+                return await generateRaw({
+                    ...generateOptions,
+                    jsonSchema: buildPlannerJsonSchema(queryLimit, evaluationOnly),
+                });
+            } catch (error) {
+                debugLog('Kimi K3 strict planner schema was rejected; retrying with prompt-only JSON', error.message || String(error));
+                return await generateRaw(generateOptions);
+            }
+        }
+        return await generateRaw(generateOptions);
+    } finally {
+        if (canTuneRequest) {
+            eventSource.removeListener(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+        }
     }
 }
 
@@ -1385,6 +1461,7 @@ async function planNextSearch({
     forceInitialSearch = false,
     settings,
     runtimeClock,
+    plannerRuntime = null,
 }) {
     const prompts = buildPlannerPrompts({
         adapter,
@@ -1402,39 +1479,121 @@ async function planNextSearch({
     });
     const profile = getResearchStrategyProfile(adapter);
     const responseLength = Math.max(profile.plannerMinTokens, settings.plannerMaxTokens);
-    const requestTuningHook = request => applyPlannerRequestTuning(request, adapter);
-    const canTuneRequest = CLIENT_COMPATIBILITY.requestRewrite;
     const generateOptions = {
         prompt: prompts.userPrompt,
         systemPrompt: prompts.systemPrompt,
         responseLength,
         trimNames: false,
     };
-    if (canTuneRequest) {
-        eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+    const generateCurrent = () => generatePlannerWithCurrent({
+        adapter,
+        generateOptions,
+        queryLimit,
+        evaluationOnly,
+    });
+    const messages = [
+        { role: 'system', content: prompts.systemPrompt },
+        { role: 'user', content: prompts.userPrompt },
+    ];
+    const profileRequested = settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.PROFILE;
+    if (profileRequested && plannerRuntime?.profileFailed && !settings.plannerFallbackToCurrent) {
+        throw new Error('Planner Connection Profile is unavailable for the rest of this research run');
     }
-    let raw;
-    try {
-        if (adapter === 'kimi-k3') {
-            try {
-                raw = await generateRaw({
-                    ...generateOptions,
-                    jsonSchema: buildPlannerJsonSchema(queryLimit, evaluationOnly),
-                });
-            } catch (error) {
-                debugLog('Kimi K3 strict planner schema was rejected; retrying with prompt-only JSON', error.message || String(error));
-                raw = await generateRaw(generateOptions);
+    const mode = resolvePlannerRequestMode(
+        settings.plannerConnectionMode,
+        Boolean(plannerRuntime?.profileFailed),
+    );
+    let profileSignal = null;
+    const runCurrentFallback = ({ error, failedSignal = null, allowed }) => (
+        runAbortableRequest(fallbackSignal => fallbackPlannerToCurrent({
+            error,
+            signal: failedSignal,
+            fallbackToCurrent: allowed,
+            isCurrent: () => (
+                !fallbackSignal.aborted
+                && (
+                    typeof plannerRuntime?.isCurrent !== 'function'
+                    || plannerRuntime.isCurrent()
+                )
+            ),
+            generateCurrent,
+        }), settings.requestTimeoutMs)
+    );
+    const execute = signal => requestHiddenPlanner({
+        mode,
+        profileId: settings.plannerProfileId,
+        // Profile fallback runs after runAbortableRequest has released its
+        // timed-out signal, so a timeout can be distinguished from a real
+        // user/chat abort without continuing work after cancellation.
+        fallbackToCurrent: false,
+        messages,
+        maxTokens: responseLength,
+        signal,
+        overridePayload: getPlannerProfileOverridePayload(),
+        service: getPlannerProfileService(),
+        generateCurrent,
+    });
+    let routed;
+    if (mode === PLANNER_CONNECTION_MODES.PROFILE) {
+        try {
+            routed = await runAbortableRequest(signal => {
+                profileSignal = signal;
+                return execute(signal);
+            }, settings.requestTimeoutMs);
+        } catch (error) {
+            if (plannerRuntime) {
+                plannerRuntime.profileFailed = true;
             }
-        } else {
-            raw = await generateRaw(generateOptions);
+            routed = await runCurrentFallback({
+                error,
+                failedSignal: profileSignal,
+                allowed: settings.plannerFallbackToCurrent,
+            });
         }
-    } finally {
-        if (canTuneRequest) {
-            eventSource.removeListener(event_types.CHAT_COMPLETION_SETTINGS_READY, requestTuningHook);
+    } else {
+        routed = await execute(null);
+    }
+    if (routed.fallbackUsed && plannerRuntime) {
+        plannerRuntime.profileFailed = true;
+        plannerRuntime.fallbackUsed = true;
+        if (!plannerRuntime.fallbackNotified) {
+            plannerRuntime.fallbackNotified = true;
+            updateStatus('planning', '副规划器不可用，本轮后续规划已回退当前回答模型');
         }
     }
-    debugLog('Planner response received', { round, evaluationOnly, length: String(raw).length });
-    return parsePlannerDecision(raw, evaluationOnly ? 1 : queryLimit);
+    const raw = routed.text;
+    debugLog('Planner response received', {
+        round,
+        evaluationOnly,
+        source: routed.source,
+        fallbackUsed: routed.fallbackUsed,
+        length: String(raw).length,
+    });
+    let decision = parsePlannerDecision(raw, evaluationOnly ? 1 : queryLimit);
+    if (decision.action === 'INVALID' && routed.source === PLANNER_CONNECTION_MODES.PROFILE) {
+        if (plannerRuntime) {
+            plannerRuntime.profileFailed = true;
+        }
+        if (settings.plannerFallbackToCurrent) {
+            if (plannerRuntime) {
+                plannerRuntime.fallbackUsed = true;
+                plannerRuntime.fallbackNotified = true;
+            }
+            updateStatus('planning', '副规划器回复格式无效，本轮后续规划已回退当前回答模型');
+            const fallback = await runCurrentFallback({
+                error: new Error('Planner Connection Profile returned invalid JSON'),
+                allowed: true,
+            });
+            const fallbackRaw = fallback.text;
+            decision = parsePlannerDecision(fallbackRaw, evaluationOnly ? 1 : queryLimit);
+            debugLog('Invalid profile planner response replaced by current-model fallback', {
+                round,
+                evaluationOnly,
+                length: String(fallbackRaw).length,
+            });
+        }
+    }
+    return decision;
 }
 
 function getSearxngConfig(settings = getSettings()) {
@@ -1485,9 +1644,9 @@ function getSearchBackendLabel(backend) {
 async function runAbortableRequest(callback, timeoutMs) {
     const controller = new AbortController();
     activeAbortController = controller;
-    const timeoutId = setTimeout(() => controller.abort('Request timed out'), timeoutMs);
+    const timeoutId = setTimeout(() => controller.abort(PLANNER_REQUEST_TIMEOUT_REASON), timeoutMs);
     try {
-        return await callback(controller.signal);
+        return await raceTaskWithAbortSignal(() => callback(controller.signal), controller.signal);
     } finally {
         clearTimeout(timeoutId);
         if (activeAbortController === controller) {
@@ -1866,6 +2025,8 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         strategyCustomPromptHash: settings.strategyCustomPromptEnabled ? hashString(settings.strategyCustomPrompt) : '',
         triggerCustomPromptEnabled: settings.triggerCustomPromptEnabled,
         triggerCustomPromptHash: settings.triggerCustomPromptEnabled ? hashString(settings.triggerCustomPrompt) : '',
+        plannerConnection: getPlannerProfileFingerprint(settings),
+        plannerFallbackToCurrent: settings.plannerFallbackToCurrent,
         maxRounds: settings.maxRounds,
         maxQueriesPerRound: settings.maxQueriesPerRound,
         maxTotalQueries: settings.maxTotalQueries,
@@ -1910,6 +2071,12 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     let invalidPlannerResponses = 0;
     let blockedUnsafeQueries = false;
     let hadSearchFailure = false;
+    const plannerRuntime = {
+        profileFailed: false,
+        fallbackUsed: false,
+        fallbackNotified: false,
+        isCurrent: () => isRunCurrent(epoch, chatId),
+    };
     const mustSearch = localGate.shouldCall;
     const fallbackPurpose = explicitSearch
         ? 'explicit user request'
@@ -1954,6 +2121,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 forceInitialSearch: mustSearch && !evidence.length,
                 settings,
                 runtimeClock,
+                plannerRuntime,
             });
         } catch (error) {
             if (!isRunCurrent(epoch, chatId)) return null;
@@ -2127,6 +2295,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 evaluationOnly: true,
                 settings,
                 runtimeClock,
+                plannerRuntime,
             });
             if (!isRunCurrent(epoch, chatId)) return null;
             if (assessment.action === 'DONE') {
@@ -3061,9 +3230,114 @@ function switchBackendUi() {
     $('#hwr_gemini_profile_settings').toggle(ENABLE_SERVER_DEPENDENT_FEATURES && backend === 'gemini_profile');
     $('#hwr_source_links_label').toggle(backend !== 'gemini_profile');
     $('#hwr_adapter_block').toggle(['searxng', 'serpapi', ...(ENABLE_SERVER_DEPENDENT_FEATURES ? ['anysearch'] : [])].includes(backend));
+    $('#hwr_planner_connection_settings').toggle(
+        ['searxng', 'serpapi', ...(ENABLE_SERVER_DEPENDENT_FEATURES ? ['anysearch'] : [])].includes(backend),
+    );
+}
+
+function getPlannerProfileDisplayLabel(profile) {
+    const context = SillyTavern.getContext();
+    const mapping = context.CONNECT_API_MAP?.[profile?.api] || {};
+    const source = mapping.source || profile?.api || 'unknown';
+    return `${profile?.name || '未命名'} — ${profile?.model || '未选模型'}（${source}）`;
+}
+
+function updatePlannerConnectionUi(profiles = null) {
+    const settings = getSettings();
+    const profileMode = settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.PROFILE;
+    $('#hwr_planner_profile_panel').toggle(profileMode);
+    const availableProfiles = profiles || getPlannerProfileService()?.getSupportedProfiles() || [];
+    const selected = availableProfiles.find(profile => profile.id === settings.plannerProfileId);
+    const { source, model } = getCurrentModelInfo();
+    const mainLabel = `${source}${model ? ` / ${model}` : ''}`;
+    if (!profileMode) {
+        $('#hwr_resolved_planner_connection').text(`规划执行：当前回答模型（${mainLabel}）；最终正文：同一当前模型`);
+        return;
+    }
+    if (selected) {
+        $('#hwr_resolved_planner_connection').text(
+            `规划执行：${getPlannerProfileDisplayLabel(selected)}；最终正文：当前回答模型（${mainLabel}）`,
+        );
+        return;
+    }
+    const fallback = settings.plannerFallbackToCurrent ? '请求时将回退当前回答模型' : '请求时会报错并使用现有本地门控兜底';
+    $('#hwr_resolved_planner_connection').text(`尚未选择可用副规划 Profile；${fallback}`);
+}
+
+function refreshPlannerProfiles() {
+    const settings = getSettings();
+    const select = $('#hwr_planner_profile');
+    const service = getPlannerProfileService();
+    const profiles = service?.getSupportedProfiles() || [];
+    select.empty().append($('<option>').val('').text('请选择副规划器 Connection Profile'));
+    for (const profile of profiles) {
+        select.append($('<option>').val(profile.id).text(getPlannerProfileDisplayLabel(profile)));
+    }
+    if (settings.plannerProfileId && !profiles.some(profile => profile.id === settings.plannerProfileId)) {
+        select.append(
+            $('<option>')
+                .val(settings.plannerProfileId)
+                .text('已保存的 Profile 当前不可用'),
+        );
+    }
+    select.val(settings.plannerProfileId);
+    $('#hwr_planner_profile_hint').text(
+        !service
+            ? 'Connection Manager 请求服务不可用；请确认酒馆版本与内置 Connection Manager 状态。'
+            : profiles.length
+                ? `发现 ${profiles.length} 个可用于副规划的 Chat Completion Profile。`
+                : '没有可用的 Chat Completion Profile；请确认 Connection Manager 已启用并至少建立一个 Chat Completion 连接。',
+    );
+    updatePlannerConnectionUi(profiles);
+}
+
+async function testPlannerProfile() {
+    const settings = getSettings();
+    if (settings.plannerConnectionMode !== PLANNER_CONNECTION_MODES.PROFILE || !settings.plannerProfileId) {
+        toastr.warning('请先选择“指定 Connection Manager Profile”并选中一个副规划器');
+        return;
+    }
+    if (activeRunEpoch !== null) {
+        toastr.warning('隐藏研究正在运行，请等待本轮结束后再测试副规划器');
+        return;
+    }
+    if (!confirm('测试会向副规划器发送一条不含聊天内容的短请求，并消耗一次模型 API 调用。继续吗？')) return;
+    updateStatus('planning', '正在测试副规划器…');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(PLANNER_REQUEST_TIMEOUT_REASON), settings.requestTimeoutMs);
+    try {
+        const messages = [
+            { role: 'system', content: 'Return a compact JSON object only. Do not call tools or search the web.' },
+            { role: 'user', content: 'Return exactly {"status":"ok"}.' },
+        ];
+        const result = await requestHiddenPlanner({
+            mode: PLANNER_CONNECTION_MODES.PROFILE,
+            profileId: settings.plannerProfileId,
+            fallbackToCurrent: false,
+            messages,
+            maxTokens: Math.max(128, Math.min(256, settings.plannerMaxTokens)),
+            signal: controller.signal,
+            overridePayload: getPlannerProfileOverridePayload(),
+            service: getPlannerProfileService(),
+            generateCurrent: async () => {
+                throw new Error('Planner test must not use the current answer model');
+            },
+        });
+        updateStatus('ready', '副规划器连接正常；最终正文连接未切换');
+        toastr.success(`收到 ${result.text.length} 个字符的规划回复`, '副规划器测试成功');
+    } catch (error) {
+        updateStatus('error', `副规划器测试失败：${error.message || error}`);
+        toastr.error(String(error.message || error), '副规划器测试失败');
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
 
 async function testStructuredSearchConnection(backend) {
+    if (activeRunEpoch !== null) {
+        toastr.warning('隐藏研究正在运行，请等待本轮结束后再测试搜索服务');
+        return;
+    }
     if (backend === 'serpapi' && !confirm('这会实际消耗一次 SerpAPI 搜索额度。继续吗？')) {
         return;
     }
@@ -3140,6 +3414,27 @@ function bindSettingsUi() {
         updateResolvedAdapterLabel();
         saveSettingsDebounced();
     });
+    $('#hwr_planner_connection_mode').val(settings.plannerConnectionMode).on('change', function () {
+        settings.plannerConnectionMode = normalizePlannerConnectionMode($(this).val());
+        $(this).val(settings.plannerConnectionMode);
+        invalidateRun('Planner connection mode changed', { clearCaches: true });
+        updatePlannerConnectionUi();
+        saveSettingsDebounced();
+    });
+    $('#hwr_planner_profile').on('change', function () {
+        settings.plannerProfileId = String($(this).val() || '');
+        invalidateRun('Planner Connection Profile changed', { clearCaches: true });
+        updatePlannerConnectionUi();
+        saveSettingsDebounced();
+    });
+    $('#hwr_planner_fallback_current').prop('checked', settings.plannerFallbackToCurrent).on('change', function () {
+        settings.plannerFallbackToCurrent = Boolean($(this).prop('checked'));
+        invalidateRun('Planner fallback policy changed', { clearCaches: true });
+        updatePlannerConnectionUi();
+        saveSettingsDebounced();
+    });
+    $('#hwr_refresh_planner_profiles').on('click', refreshPlannerProfiles);
+    $('#hwr_test_planner_profile').on('click', testPlannerProfile);
     $('#hwr_result_transport').val(settings.resultTransport).on('change', function () {
         settings.resultTransport = normalizeResearchTransport($(this).val());
         $(this).val(settings.resultTransport);
@@ -3294,6 +3589,7 @@ function bindSettingsUi() {
     $('#hwr_refresh_model').on('click', () => {
         updateResolvedAdapterLabel();
         updateResolvedTransportLabel();
+        updatePlannerConnectionUi();
     });
     $('#hwr_clear_cache').on('click', () => {
         invalidateRun('Caches cleared', { clearCaches: true });
@@ -3309,6 +3605,7 @@ function bindSettingsUi() {
         updateSearchApiCredentialStatus('anysearch');
     }
     updateSearchApiCredentialStatus('serpapi');
+    refreshPlannerProfiles();
     updateResolvedAdapterLabel();
     updateResolvedTransportLabel();
     switchBackendUi();

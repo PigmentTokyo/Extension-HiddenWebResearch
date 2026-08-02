@@ -51,8 +51,8 @@
                     <summary>自定义查询规划与最终回答策略</summary>
                     <div class="hwr_prompt_editor_body">
                         <div class="hwr_hint">
-                            这是所选内置策略之上的补充层，同时影响隐藏规划器怎样组织查询，以及搜后怎样使用证据回答；不会替换当前模型，也不会调用所选名称对应的厂商模型。
-                            例如当前回答模型是 DeepSeek 而手选 Claude，仍由 DeepSeek 执行，只是采用 Claude 启发的规则与这份补充指令。
+                            这是所选内置策略之上的补充层，同时影响隐藏规划器怎样组织查询，以及搜后主模型怎样使用证据回答；策略名称本身不会切换任何模型。
+                            例如主模型是 DeepSeek 而手选 Claude，只表示采用 Claude 启发规则；规划由下方选择的规划 API 执行，最终正文仍由 DeepSeek 执行。
                         </div>
                         <label class="checkbox_label" for="hwr_strategy_custom_enabled">
                             <input type="checkbox" id="hwr_strategy_custom_enabled">
@@ -74,10 +74,46 @@
                             </button>
                         </div>
                         <div class="hwr_hint">
-                            自定义内容会随相关隐藏规划请求发送给当前模型，并在有搜索结果时进入本轮最终回答上下文；请勿填写 Key、Token、密码或私人信息。固定的证据安全、引用真实性、禁止伪装厂商原生搜索以及高级查询上限仍优先。恢复默认只清除这份补充词，不会更改上面的模型策略下拉框。
+                            自定义内容会随相关请求发送给所选隐藏规划模型，并在有搜索结果时进入主模型的本轮最终回答上下文；请勿填写 Key、Token、密码或私人信息。固定的证据安全、引用真实性、禁止伪装厂商原生搜索以及高级查询上限仍优先。恢复默认只清除这份补充词，不会更改上面的模型策略下拉框。
                         </div>
                     </div>
                 </details>
+            </div>
+
+            <div id="hwr_planner_connection_settings" class="hwr_backend_box">
+                <h4>隐藏搜索规划 API</h4>
+                <label for="hwr_planner_connection_mode">规划器来源</label>
+                <select id="hwr_planner_connection_mode" class="text_pole">
+                    <option value="current">当前回答模型（原有方式）</option>
+                    <option value="profile">指定 Connection Manager Profile（副 API）</option>
+                </select>
+                <div id="hwr_planner_profile_panel" class="hwr_connection_panel">
+                    <label for="hwr_planner_profile">副 API Profile（仅列出 Chat Completion）</label>
+                    <div class="hwr_inline">
+                        <select id="hwr_planner_profile" class="text_pole"></select>
+                        <button id="hwr_refresh_planner_profiles" class="menu_button" type="button" title="刷新 Connection Profile">
+                            <i class="fa-solid fa-rotate"></i>
+                        </button>
+                    </div>
+                    <div id="hwr_planner_profile_hint" class="hwr_hint"></div>
+                    <label class="checkbox_label" for="hwr_planner_fallback_current">
+                        <input type="checkbox" id="hwr_planner_fallback_current">
+                        <span>副 API 失败时，本轮后续规划回退当前回答模型（推荐）</span>
+                    </label>
+                    <button id="hwr_test_planner_profile" class="menu_button hwr_button" type="button">
+                        <i class="fa-solid fa-flask"></i>
+                        <span>测试副规划器（会调用一次 API）</span>
+                    </button>
+                </div>
+                <div id="hwr_resolved_planner_connection" class="hwr_hint"></div>
+                <div class="hwr_notice">
+                    副 API 只执行隐藏的 SEARCH / DONE 判断、查询词规划、补搜和资料充分性评估；最终正文始终使用当前回答模型。它会收到本轮用户请求、设置范围内的最近聊天以及已取得的搜索摘要。每次规划仍是独立模型调用，只是费用和负载转移到所选 Profile。
+                    扩展只保存 Profile ID，URL、Proxy 与 Key 继续由 SillyTavern Connection Manager 管理，并且不会切换酒馆当前连接。插件不向副 API 提交搜索工具，同时显式关闭 SillyTavern 的原生联网开关；如果模型名称（例如 <code>:online</code>）、模型本身或中转网关强制联网，前端插件无法禁止，可能另行产生搜索费用。
+                    只应选择你信任的 Profile 和 HTTPS 端点。副规划 Profile 路径不会读取或复制 Connection Manager 中已保存的 Key，但无法替你审计中转服务器；Connection Manager、Proxy Preset 与同源第三方扩展属于同一前端信任域。
+                </div>
+                <div class="hwr_warning">
+                    SillyTavern 1.13.3–1.17.x 可以独立选择 Profile 的来源、URL 和模型，但请求使用该 SillyTavern Chat Completion 来源当前激活的密钥槽；从 1.18.0 起才会按 Profile 精确选择独立 <code>secret-id</code>。旧版需要不同 Key 时，请让副规划器使用另一来源，或把规划 Key 设为对应来源的当前激活 Key。Reverse Proxy Preset 的密码是例外，由酒馆自身的 Proxy Preset 设置机制管理。
+                </div>
             </div>
 
             <label for="hwr_result_transport">搜索结果注入方式</label>
@@ -106,7 +142,7 @@
                 <option value="explicit">仅在用户明确要求联网时搜索（其他消息本地跳过）</option>
             </select>
             <div class="hwr_hint">
-                触发策略回答“这一轮是否进入研究流程”。“模型自动判断”会调用当前回答模型作为隐藏规划器：明确搜索、天气、时效信息和推荐等高置信场景由本地门控保证至少搜索一次，其余模糊场景由上面的模型策略判断；即使最后不搜索也会消耗规划 tokens。
+                触发策略回答“这一轮是否进入研究流程”。“模型自动判断”会调用上方选择的隐藏规划器（默认当前回答模型）：明确搜索、天气、时效信息和推荐等高置信场景由本地门控保证至少搜索一次，其余模糊场景由上面的模型策略判断；即使最后不搜索也会消耗规划 tokens。
                 “每条消息”仍会让规划器先组织查询，但至少执行一次搜索；明确禁止联网和只问本机日期/时间是例外。“仅明确要求联网”会在其他消息上本地零 token 跳过。当前用户明确要求“不联网”始终优先于全部选项。
             </div>
             <details class="hwr_prompt_editor">
@@ -135,7 +171,7 @@
                         </button>
                     </div>
                     <div class="hwr_hint">
-                        自定义内容会随被触发的隐藏规划请求发送给当前模型并增加少量输入 tokens；请勿填写 Key、Token、密码或私人信息。恢复默认只清除这份补充词，不会更改触发策略下拉框。
+                        自定义内容会随被触发的隐藏规划请求发送给所选规划模型并增加少量输入 tokens；请勿填写 Key、Token、密码或私人信息。恢复默认只清除这份补充词，不会更改触发策略下拉框。
                     </div>
                 </div>
             </details>

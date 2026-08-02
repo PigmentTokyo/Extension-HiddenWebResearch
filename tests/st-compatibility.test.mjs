@@ -115,7 +115,7 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 assert.equal(manifest.minimum_client_version, MINIMUM_SUPPORTED_CLIENT_VERSION);
-assert.equal(manifest.version, '1.8.4');
+assert.equal(manifest.version, '1.9.0');
 assert.match(indexSource, /CLIENT_VERSION/u);
 assert.match(indexSource, /supportsGeminiToolChoiceNone\(CLIENT_VERSION\)/u);
 assert.match(indexSource, /buildCompletedClientToolMessages/u);

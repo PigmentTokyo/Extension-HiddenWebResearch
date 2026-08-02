@@ -11,6 +11,7 @@
 - 最低支持 SillyTavern `1.13.3`；这是该版本首次同时具备扩展所需的对象式 `generateRaw()`、带生成类型的请求改写事件、多密钥接口和当前搜索路由协议。
 - `1.13.3–1.14.x` 保留 SearXNG、SerpAPI、隐藏规划、时间锚、模型策略、自定义提示词、缓存和无额外楼层等全部公开能力。由于这些版本不能把 `tool_choice: none` 可靠转换给 Gemini，Gemini 会自动走同一份中性隐藏研究包；Claude、DeepSeek 和其他安全来源仍可使用隐藏工具结果。
 - `1.15.0` 及以上保持当前双通道行为：安全时优先隐藏工具结果，其他情况自动回退隐藏研究包；Gemini 3 继续保守回退。
+- 指定 Connection Profile 作为副规划 API 的请求能力从 `1.13.3` 起即可使用；但 `1.13.3–1.17.x` 使用对应 SillyTavern Chat Completion 来源当前激活的密钥槽，`1.18.0` 起才能按 Profile 精确绑定独立 `secret-id`。
 - `1.18.x` 仍是主要实机回归环境。降低最低版本不会删除或关闭新版本上的任何现有功能。
 
 兼容判断采用实际接口和请求能力，并对旧版 Gemini 协议做安全降级；不是简单绕过 manifest。低于 `1.13.3` 的版本不会加载本扩展。
@@ -18,7 +19,8 @@
 ## 它解决什么问题
 
 - Claude/Gemini 中转、DeepSeek、GLM、Kimi 或其他没有原生联网能力的模型，可以在正式回答前进行隐藏搜索。
-- 当前回答模型通过 `generateRaw()` 规划查询、判断是否补搜，并负责最终写作。
+- 可把查询规划、补搜与充分性判断交给当前回答模型，也可指定另一个 Connection Manager Profile 作为便宜的副 API；最终正文始终由当前主模型写作。
+- 当前模型模式继续通过 `generateRaw()` 规划；副 API 模式直接按 Profile 发请求，不切换酒馆当前连接，也不要求修改后端或安装 server plugin。
 - 搜索证据优先在本轮请求发出前转换为客户端工具调用与工具结果；连接不支持安全工具消息时，自动保留为临时 depth-0 `IN_CHAT` 隐藏研究包。
 - 搜索结果标准化为标题、URL、摘要和可选日期；最终回答可使用紧跟事实的真实 Markdown 编号链接。
 - regenerate 和 swipe 可在短时间内复用内存研究结果。
@@ -71,6 +73,37 @@
 
 搜索后还会应用相应的最终回答契约。这些都是基于公开行为的启发式模拟；扩展不会伪造 Anthropic/Google 私有提示词、`groundingMetadata`、官方搜索声明或厂商签名。普通中转最终看到的是带外部证据的本轮临时上下文，并由当前模型自己完成回答。
 
+## 隐藏搜索规划 API
+
+“规划器来源”与上面的“查询规划与最终回答策略”是两件不同的事：
+
+- **当前回答模型（默认）**：保持旧版行为，由当前主连接执行隐藏规划，再由同一主模型生成最终正文。
+- **指定 Connection Manager Profile（副 API）**：所选 Profile 只负责 `SEARCH / DONE` 判断、查询词生成、补搜与最后的证据充分性评估；正文仍走当前主连接。
+- **策略下拉框**：决定规划提示词和最终回答契约。它不会自动切换到对应厂商；例如主模型 DeepSeek、策略选 Claude、副规划 Profile 选 Gemini 时，Gemini 会执行 Claude 启发的规划规则，而最终正文仍由 DeepSeek 写。
+
+副 API 模式复用原版 SillyTavern 的 `ConnectionManagerRequestService.sendRequest()`：
+
+- 只列出 Chat Completion Profile，避免 Text Completion 的 Instruct 模板污染严格规划 JSON。
+- 插件设置只保存 Profile ID；URL、Proxy 和服务商 Key 仍由 Connection Manager / SillyTavern secrets 管理。Reverse Proxy Preset 的密码由酒馆自身的 Proxy Preset 设置机制管理。
+- 不修改 `selectedProfile` 或当前聊天连接，因此不存在“切到副模型后忘记切回”的竞态。
+- Profile 请求显式设置 `enable_web_search: false` 且不提交搜索工具，所以插件不会主动请求厂商原生搜索；但无法阻止 `:online` 型号、先天联网模型或中转网关强制搜索，这类服务仍可能另行收费。
+- 不额外加载角色卡、世界书、Completion Preset 或 Instruct 模板；仍保留 Profile 为适配目标 API 所记录的端点、模型、代理与协议处理设置。最近真实聊天中的角色扮演内容仍会按上下文范围发送。
+- 副规划器会收到最新用户请求、设置范围内的最近真实聊天消息、补搜阶段已经取得的网页摘要，以及启用的自定义规划补充词。只选择自己信任的 Profile 和 HTTPS 端点，不要把不愿发送给该副 API 的内容放进规划上下文。
+- Connection Manager、Proxy Preset 与所有同源第三方扩展属于同一前端信任域。副规划 Profile 路径不会读取或复制 Connection Manager 中已保存的 Key，但无法替用户审计 Custom API 或中转服务器。
+
+默认启用“副 API 失败时回退当前回答模型”：一次 Profile 缺失、超时、上游错误、空回复或格式错误后，本轮后续规划直接走当前模型，不会每轮先失败一次再双重计费。用户停止或切换聊天造成的 abort 不会触发回退。关闭该选项后，坏 Profile 仍会在本轮熔断而不再重复收费；明确必须搜索的请求可使用本地安全查询兜底，模糊请求则继续普通生成。
+
+### 旧版 Key 选择限制
+
+| SillyTavern | Profile 的 URL / 模型 / 来源 | Profile 独立 Key |
+| --- | --- | --- |
+| 1.13.3–1.17.x | 支持 | 不完整：使用对应 Chat Completion 来源当前激活的密钥槽 |
+| 1.18.0+ | 支持 | 支持按 Profile 的 `secret-id` 精确选择 |
+
+因此旧版如果主模型与副规划器使用同一个 SillyTavern Chat Completion 来源密钥槽、又必须使用两把不同 Key，不能承诺真正隔离。可让副规划器使用另一来源，或先把规划 Key 设为该来源的当前激活 Key。扩展不会通过临时轮换 Key 或切换 Profile 绕过此限制，因为那会改变全局状态并产生并发竞态。
+
+Reverse Proxy Profile 是例外：它使用 Proxy Preset 的 password，而不是服务商 `secret-id`；该密码遵循 SillyTavern 自身的 Proxy Preset 设置与存储机制。
+
 ## 搜索结果怎样注入
 
 - **隐藏工具结果优先（推荐）**：扩展先用临时 `IN_CHAT` 标记让 SillyTavern 正确计算本轮 token；正式请求构造完成后，再只在内存中把该标记换成一个客户端工具调用及其结果。SillyTavern 会按当前来源转换：Claude 为 `tool_use/tool_result`，Gemini 为 `functionCall/functionResponse`，DeepSeek/OpenAI 兼容来源为 `tool_calls/tool`。
@@ -84,24 +117,24 @@
 
 ## 触发策略与 token
 
-- **模型自动判断**：除纯本地日期/时间外，会调用当前回答模型作为隐藏规划器。明确联网、天气、动态信息、推荐、URL 等高置信场景由本地门控保证至少搜索一次；普通或模糊场景由上面的模型策略返回 `SEARCH` 或 `DONE`。即使最终不搜索，也会消耗规划 tokens。
-- **每条消息都调用并至少搜索一次**：仍先调用隐藏规划器来提炼查询，但它不能否决首次搜索；本条明确禁止联网和纯本地日期/时间是例外。
-- **仅在用户明确要求联网时搜索**：先由本地规则识别“联网查、网页搜索、给来源、查证报道”等请求。未命中时零模型 token 跳过；命中后再调用规划器组织查询，并保证至少搜索一次。
+- **模型自动判断**：除纯本地日期/时间外，会调用所选隐藏规划器。明确联网、天气、动态信息、推荐、URL 等高置信场景由本地门控保证至少搜索一次；普通或模糊场景由模型策略返回 `SEARCH` 或 `DONE`。即使最终不搜索，也会消耗规划 tokens。
+- **每条消息都调用并至少搜索一次**：仍先调用所选规划器来提炼查询，但它不能否决首次搜索；本条明确禁止联网和纯本地日期/时间是例外。
+- **仅在用户明确要求联网时搜索**：先由本地规则识别“联网查、网页搜索、给来源、查证报道”等请求。未命中时零模型 token 跳过；命中后再调用所选规划器组织查询，并保证至少搜索一次。
 
 换句话说，“查询与回答策略”决定**怎样判断模糊情况、怎样查、怎样写**；“触发策略”决定**这一轮是否进入研究流程，以及首次搜索能否被跳过**。当前用户明确要求“不联网”始终拥有最高优先级。规划器不会向用户直接回答；所有历史文本和搜索摘要都作为不可信数据封装，网页中的指令不会被执行。
 ### 自定义补充提示词
 
 设置页提供两套彼此独立的补充词，并各自带“保存”和“恢复内置默认”：
 
-- **查询规划与最终回答策略补充**：同时影响查询焦点、来源偏好、补搜顺序、证据充分性，以及有搜索结果时当前模型怎样组织最终回答；它不会把当前模型替换成下拉框所写的模型。比如 DeepSeek 手选 Claude，仍由 DeepSeek 执行，只是采用 Claude 启发策略。
+- **查询规划与最终回答策略补充**：同时影响查询焦点、来源偏好、补搜顺序、证据充分性，以及有搜索结果时主模型怎样组织最终回答；它不会把模型替换成下拉框所写的厂商。规划由所选规划器执行，最终正文始终由当前主模型执行。
 - **触发判断补充**：只影响模糊场景是否值得进入研究。它不能取消明确搜索、天气等本地高置信门控，也不能绕过“仅明确要求联网”的本地跳过。
 
-两者都是内置固定策略之上的低优先级补充层。明确“不联网”、纯本机日期/时间绕过、查询轮数与数量硬上限、凭据拦截、严格规划输出、证据安全和禁止伪装厂商原生搜索始终优先。“恢复内置默认”会清除相应补充词并自动使用当前版本的内置规则，不会改动其他设置。补充词最长 4000 字符，会随相关请求发送给当前模型；不要填写 Key、Token、密码或私人信息。
+两者都是内置固定策略之上的低优先级补充层。明确“不联网”、纯本机日期/时间绕过、查询轮数与数量硬上限、凭据拦截、严格规划输出、证据安全和禁止伪装厂商原生搜索始终优先。“恢复内置默认”会清除相应补充词并自动使用当前版本的内置规则，不会改动其他设置。补充词最长 4000 字符，会发送给所选规划器；取得证据后还会进入主模型的最终回答上下文。不要填写 Key、Token、密码或私人信息。
 
 ## 无额外楼层的实现
 
 1. 正式生成开始前，`generate_interceptor` 读取最近对话。
-2. 当前模型通过隐藏 `generateRaw()` 请求规划查询。
+2. 当前模型通过隐藏 `generateRaw()`，或指定 Connection Profile 通过独立请求规划查询。
 3. 扩展调用 SearXNG 或 SerpAPI，并根据证据缺口决定是否补搜。
 4. 扩展先把带唯一标记的研究包作为临时 system-role `IN_CHAT` 提示加入本轮 token 预算。
 5. 在 `CHAT_COMPLETION_SETTINGS_READY` 阶段，自动模式会把标记块改写为请求内的客户端工具调用与工具结果；不能安全改写时原样保留中性研究包。
@@ -115,6 +148,7 @@
 
 - 联网模式：本机 SearXNG
 - 查询规划策略：自动识别
+- 规划器来源：默认当前回答模型；想把规划费用转移到便宜模型时选择独立 Connection Profile
 - 搜索结果注入：隐藏工具结果优先
 - 触发策略：需要节省规划 token 时选择“仅明确要求联网”；希望模型自动决定时选择“模型自动判断”
 - 最多规划轮数：3
@@ -133,7 +167,15 @@
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.8.4`。最低支持 SillyTavern `1.13.3`；`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.9.0`。最低支持 SillyTavern `1.13.3`；`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.9.0`：
+
+- 新增“隐藏搜索规划 API”，可选择任意 Chat Completion Connection Profile 作为副规划器，主回答连接与最终正文模型保持不变；
+- Profile 模式不保存副规划器 URL/Key、不切换全局 Profile、不依赖 server plugin；插件不主动提交搜索工具，也不额外加载角色卡、世界书、Completion/Instruct 预设；
+- 副 API 缺失、空回复、格式错误、超时或上游失败时可整轮熔断并回退当前模型；用户取消不回退，避免已停止请求继续计费或污染新聊天；
+- 研究缓存加入规划模式、Profile ID、模型、URL 和回退策略指纹；设置 schema 升为 10，旧配置自动使用原有“当前回答模型”方式；
+- 明示 1.13.3–1.17.x 使用对应来源当前激活密钥槽、1.18.0 起才支持按 Profile 独立 `secret-id` 的版本边界。
 
 `1.8.4`：
 
@@ -207,6 +249,7 @@ node tests/gemini-grounding.test.mjs
 node tests/native-search-metrics.test.mjs
 node tests/planner-strategies.test.mjs
 node tests/planner-prompts.test.mjs
+node tests/planner-request-router.test.mjs
 node tests/query-safety.test.mjs
 node tests/search-providers.test.mjs
 node tests/feature-policy.test.mjs
