@@ -1861,7 +1861,8 @@ async function planNextSearch({
     // their metadata on older clients, but never attempt a request with the
     // globally active Custom key or make the fallback checkbox relevant.
     const effectiveMode = configuredMode === PLANNER_CONNECTION_MODES.DIRECT
-        && !isPlannerDirectConnectionSupported()
+        && (!isPlannerDirectConnectionSupported()
+            || !getSelectedPlannerDirectProfile(settings))
         ? PLANNER_CONNECTION_MODES.CURRENT
         : configuredMode;
     const externalRequested = effectiveMode !== PLANNER_CONNECTION_MODES.CURRENT;
@@ -4815,7 +4816,6 @@ async function savePlannerDirectProfile(options = {}) {
         savedProfile = normalizePlannerDirectProfile({ ...draft, secretId });
         const activateReady = options?.activateReady !== false;
         const profileReady = isPlannerDirectProfileReady(savedProfile);
-        const selectionChanged = previousSelectedId !== savedProfile.id;
         const nextProfiles = existing
             ? profiles.map(profile => profile.id === existing.id ? savedProfile : profile)
             : [...profiles, savedProfile];
@@ -4823,9 +4823,7 @@ async function savePlannerDirectProfile(options = {}) {
         settings.plannerDirectProfileId = savedProfile.id;
         settings.plannerConnectionMode = profileReady && activateReady
             ? PLANNER_CONNECTION_MODES.DIRECT
-            : previousMode === PLANNER_CONNECTION_MODES.DIRECT && (!profileReady || selectionChanged)
-                ? PLANNER_CONNECTION_MODES.CURRENT
-                : previousMode;
+            : previousMode;
         normalizeSettings(settings);
         hostSendLock.assertSafe();
 

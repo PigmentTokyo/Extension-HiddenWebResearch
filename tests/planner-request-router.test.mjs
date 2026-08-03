@@ -853,8 +853,9 @@ assert.match(
 assert.match(directSaveMutationSource, /const activateReady = options\?\.activateReady !== false/u);
 assert.match(
     directSaveMutationSource,
-    /profileReady && activateReady[\s\S]*?previousMode === PLANNER_CONNECTION_MODES\.DIRECT[\s\S]*?PLANNER_CONNECTION_MODES\.CURRENT/u,
+    /profileReady && activateReady[\s\S]*?PLANNER_CONNECTION_MODES\.DIRECT[\s\S]*?: previousMode/u,
 );
+assert.doesNotMatch(directSaveMutationSource, /selectionChanged/u);
 const directModelListStart = indexSource.indexOf('async function fetchPlannerDirectModels');
 const directModelListEnd = indexSource.indexOf('async function testPlannerDirectProfile', directModelListStart);
 assert.ok(directModelListStart >= 0 && directModelListEnd > directModelListStart);
@@ -946,6 +947,10 @@ assert.match(plannerSource, /failedSignal:\s*secondarySignal/u);
 assert.match(plannerSource, /allowed:\s*settings\.plannerFallbackToCurrent/u);
 assert.match(plannerSource, /decision\.action === 'INVALID' && routed\.source !== PLANNER_CONNECTION_MODES\.CURRENT/u);
 assert.match(plannerSource, /resolvePlannerRequestMode\(/u);
+assert.match(
+    plannerSource,
+    /configuredMode === PLANNER_CONNECTION_MODES\.DIRECT[\s\S]*?!isPlannerDirectConnectionSupported\(\)[\s\S]*?!getSelectedPlannerDirectProfile\(settings\)[\s\S]*?PLANNER_CONNECTION_MODES\.CURRENT/u,
+);
 assert.match(indexSource, /raceTaskWithAbortSignal\(\(\) => callback\(controller\.signal\), controller\.signal\)/u);
 assert.match(indexSource, /controller\.abort\(PLANNER_REQUEST_TIMEOUT_REASON\)/u);
 assert.match(
