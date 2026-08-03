@@ -92,6 +92,23 @@ const importedWithoutCredential = normalizePlannerDirectProfile({
 assert.equal(importedWithoutCredential.secretId, '');
 assert.equal(isPlannerDirectProfileReady(importedWithoutCredential), false);
 assert.equal(isPlannerDirectProfileReady(normalized), true);
+
+const credentialDraft = normalizePlannerDirectProfile({
+    id: 'model-pending',
+    name: 'Model pending',
+    apiUrl: 'https://draft.example/v1',
+    model: '   ',
+    secretId: 'server-secret-id-draft',
+});
+assert.deepEqual(credentialDraft, {
+    id: 'model-pending',
+    name: 'Model pending',
+    apiUrl: 'https://draft.example/v1',
+    model: '',
+    secretId: 'server-secret-id-draft',
+});
+assert.equal(isPlannerDirectProfileReady(credentialDraft), false);
+assert.equal(getReadyPlannerDirectProfile([credentialDraft], credentialDraft.id), null);
 assert.equal(isPlannerDirectProfileReady(null), false);
 assert.equal(isPlannerDirectProfileReady({ ...normalized, apiUrl: 'javascript:alert(1)' }), false);
 
@@ -101,7 +118,6 @@ for (const invalidProfile of [
     { ...normalized, id: '' },
     { ...normalized, id: 'bad\nid' },
     { ...normalized, name: '' },
-    { ...normalized, model: '' },
     { ...normalized, model: 'bad\u0000model' },
     { ...normalized, secretId: 'secret id with spaces' },
 ]) {

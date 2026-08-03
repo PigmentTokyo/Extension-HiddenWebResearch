@@ -33,9 +33,17 @@ const secondProfile = {
     model: 'planner-medium',
     secretId: 'secret-two',
 };
+const credentialDraft = {
+    id: 'planner-draft',
+    name: 'Credential draft',
+    apiUrl: 'https://draft.example/v1',
+    model: '',
+    secretId: 'secret-draft',
+};
 
 assert.equal(hasOnlyPlannerDirectProfileMetadataFields(firstProfile), true);
 assert.equal(isPlannerDirectProfileMetadataShape(firstProfile), true);
+assert.equal(isPlannerDirectProfileMetadataShape(credentialDraft), true);
 assert.equal(hasOnlyPlannerDirectProfileMetadataFields({ ...firstProfile, apiKey: rawCredential }), false);
 assert.equal(isPlannerDirectProfileMetadataShape({ ...firstProfile, token: rawCredential }), false);
 assert.equal(hasOnlyPlannerDirectProfileMetadataFields({ id: 'allowed-subset' }), true);

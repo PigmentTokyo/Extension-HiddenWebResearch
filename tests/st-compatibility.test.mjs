@@ -41,6 +41,7 @@ assert.equal(supportsPlannerDirectSecretId('SillyTavern:UNKNOWN:Cohee#1207'), fa
 
 const eventTypes = {
     CHAT_COMPLETION_SETTINGS_READY: 'chat_completion_settings_ready',
+    GENERATION_STARTED: 'generation_started',
     GENERATION_ENDED: 'generation_ended',
     GENERATION_STOPPED: 'generation_stopped',
     CHAT_CHANGED: 'chat_id_changed',
@@ -121,7 +122,7 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 assert.equal(manifest.minimum_client_version, MINIMUM_SUPPORTED_CLIENT_VERSION);
-assert.equal(manifest.version, '1.12.0');
+assert.equal(manifest.version, '1.12.1');
 assert.match(indexSource, /CLIENT_VERSION/u);
 assert.match(indexSource, /supportsGeminiToolChoiceNone\(CLIENT_VERSION\)/u);
 assert.match(indexSource, /buildCompletedClientToolMessages/u);

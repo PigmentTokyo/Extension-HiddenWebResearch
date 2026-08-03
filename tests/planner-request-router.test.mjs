@@ -850,6 +850,25 @@ assert.match(
     directTransactionSource.slice(directDeleteMutationStart),
     /hostSendLock = acquirePlannerDirectHostSendLock\(\)[\s\S]*?flushPendingSettingsBeforePlannerDirectMutation\(settings\)[\s\S]*?hostSendLock\.assertSafe\(\)[\s\S]*?saveAndVerifyPlannerDirectSettings\(settings\)/u,
 );
+assert.match(directSaveMutationSource, /const activateReady = options\?\.activateReady !== false/u);
+assert.match(
+    directSaveMutationSource,
+    /profileReady && activateReady[\s\S]*?previousMode === PLANNER_CONNECTION_MODES\.DIRECT[\s\S]*?PLANNER_CONNECTION_MODES\.CURRENT/u,
+);
+const directModelListStart = indexSource.indexOf('async function fetchPlannerDirectModels');
+const directModelListEnd = indexSource.indexOf('async function testPlannerDirectProfile', directModelListStart);
+assert.ok(directModelListStart >= 0 && directModelListEnd > directModelListStart);
+const directModelListSource = indexSource.slice(directModelListStart, directModelListEnd);
+assert.match(directModelListSource, /const needsSave = !profile/u);
+assert.match(
+    directModelListSource,
+    /profile = await savePlannerDirectProfile\(\{ activateReady: false \}\)/u,
+);
+assert.match(directModelListSource, /const current = getPlannerDirectProfileMetadata\(getSettings\(\)\)/u);
+assert.doesNotMatch(
+    directModelListSource,
+    /const current = getSelectedPlannerDirectProfile\(getSettings\(\)\)/u,
+);
 assert.match(indexSource, /if \(plannerDirectSaveLocked\) \{[\s\S]*?本轮不启动隐藏研究/u);
 assert.match(visibleSettingsHtml, /<details class="hwr_subdetails">[\s\S]*?直连 Key 安全与版本说明/u);
 assert.match(visibleSettingsHtml, /独立直连配置需要 SillyTavern 1\.18\.0\+/u);
@@ -892,6 +911,7 @@ const plannerSource = indexSource.slice(plannerStart, plannerEnd);
 
 assert.match(directServiceSource, /supportsPlannerDirectSecretId\(CLIENT_VERSION\)/u);
 assert.match(directServiceSource, /ChatCompletionService\?\.processRequest/u);
+assert.match(directServiceSource, /isPlannerDirectProfileReady\(profile\)/u);
 assert.match(
     directServiceSource,
     /sendRequest:\s*async \(profileId, messages, maxTokens, custom = \{\}, overridePayload = \{\}\)/u,
@@ -1028,6 +1048,7 @@ const directTestEnd = indexSource.indexOf('function getPlannerProfileDisplayLabe
 assert.ok(directTestStart >= 0 && directTestEnd > directTestStart);
 const directTestSource = indexSource.slice(directTestStart, directTestEnd);
 assert.match(directTestSource, /activeRunEpoch !== null/u);
+assert.match(directTestSource, /const profile = getSelectedPlannerDirectProfile\(settings\)/u);
 assert.match(directTestSource, /const controller = new AbortController\(\)/u);
 assert.match(directTestSource, /mode:\s*PLANNER_CONNECTION_MODES\.DIRECT/u);
 assert.match(directTestSource, /fallbackToCurrent:\s*false/u);

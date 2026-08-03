@@ -127,6 +127,11 @@ import {
     supportsGeminiToolChoiceNone,
     supportsPlannerDirectSecretId,
 } from './st-compatibility.js';
+import {
+    captureGenerationStartSnapshot,
+    isJsSlashRunnerPromptViewerRefreshActive,
+    shouldSkipSyntheticGeneration,
+} from './generation-request-guard.js';
 
 const EXTENSION_ID = 'third-party/Extension-HiddenWebResearch';
 const SETTINGS_KEY = 'hiddenWebResearch';
@@ -215,6 +220,7 @@ let activeRunEpoch = null;
 let activeAbortController = null;
 let activeToolTransport = null;
 let activePromptInjection = false;
+let generationStartSnapshot = null;
 let pausedBackendMigration = '';
 let plannerDirectCredentialRequestGuard = null;
 const plannerDirectCredentialSealedRequests = new WeakMap();
@@ -1435,9 +1441,10 @@ function updateSettingsSectionSummaries({ openMissing = false, openSource = fals
         const profile = getPlannerDirectProfileMetadata(settings);
         const ready = isPlannerDirectConnectionSupported()
             && profile
+            && isPlannerDirectProfileReady(profile)
             && plannerDirectSecretExists(profile.secretId);
         plannerMissing = !ready;
-        plannerText = ready ? profile.name : '直连未配置';
+        plannerText = ready ? profile.name : profile && !profile.model ? '直连待选择模型' : '直连未配置';
     }
     $('#hwr_planner_summary').text(plannerText);
 
@@ -3630,12 +3637,33 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
     if (!Array.isArray(chat) || !chat.length) {
         return;
     }
+
+    const context = SillyTavern.getContext();
+    const snapshot = generationStartSnapshot;
+    generationStartSnapshot = null;
+    const promptViewerRefreshActive = isJsSlashRunnerPromptViewerRefreshActive(globalThis.document);
+    if (shouldSkipSyntheticGeneration({
+        snapshot,
+        type,
+        chatId: context.chatId,
+        groupId: context.groupId,
+        chat: context.chat,
+        promptViewerRefreshActive,
+    })) {
+        debugLog('Skipping synthetic or non-conversational normal generation');
+        updateStatus(
+            'idle',
+            promptViewerRefreshActive
+                ? '已忽略提示词查看器的预览请求'
+                : '已忽略没有新增用户回合的预览请求',
+        );
+        return;
+    }
     if (activeRunEpoch !== null) {
         debugLog('Skipping overlapping interceptor run');
         return;
     }
 
-    const context = SillyTavern.getContext();
     const chatId = context.chatId;
     const conversationChat = Array.isArray(context.chat) && context.chat.length ? context.chat : chat;
     const runtimeClock = captureRuntimeClock();
@@ -4013,7 +4041,7 @@ function getPlannerDirectDisplayLabel(profile) {
     } catch {
         // Normalization will flag malformed imported metadata elsewhere.
     }
-    return `${profile.name} — ${profile.model}（${host}）`;
+    return `${profile.name} — ${profile.model || '待选择模型'}（${host}）`;
 }
 
 function setPlannerDirectStatus(state, text) {
@@ -4040,6 +4068,8 @@ function populatePlannerDirectForm(profile = null) {
         setPlannerDirectStatus('missing', getPlannerDirectUnavailableReason());
     } else if (!profile) {
         setPlannerDirectStatus('missing', '新配置首次保存时必须填写 API Key。');
+    } else if (plannerDirectSecretExists(profile.secretId) && !profile.model) {
+        setPlannerDirectStatus('dirty', '凭据草稿已保存；拉取并选择模型后再次保存，配置才会启用。');
     } else if (plannerDirectSecretExists(profile.secretId)) {
         setPlannerDirectStatus('saved', 'Key 已由 SillyTavern 服务端保存，不会回显；留空不会替换。');
     } else {
@@ -4076,7 +4106,8 @@ function refreshPlannerDirectProfilesUi() {
     const select = $('#hwr_planner_direct_connection');
     select.empty().append($('<option>').val('').text('新建或选择一个副 API 配置'));
     for (const profile of profiles) {
-        const suffix = plannerDirectSecretExists(profile.secretId) ? '' : '（Key 缺失）';
+        const keyReady = plannerDirectSecretExists(profile.secretId);
+        const suffix = !keyReady ? '（Key 缺失）' : !profile.model ? '（待选择模型）' : '';
         select.append($('<option>').val(profile.id).text(`${getPlannerDirectDisplayLabel(profile)}${suffix}`));
     }
     select.val(settings.plannerDirectProfileId);
@@ -4666,7 +4697,7 @@ function isPlannerDirectMutationBusy() {
     return activeRunEpoch !== null || is_send_press || is_group_generating || plannerDirectTestLocked;
 }
 
-async function savePlannerDirectProfile() {
+async function savePlannerDirectProfile(options = {}) {
     if (plannerDirectSaveLocked) return;
     if (isPlannerDirectMutationBusy()) {
         $('#hwr_planner_direct_key').val('');
@@ -4782,12 +4813,19 @@ async function savePlannerDirectProfile() {
 
         hostSendLock.assertSafe();
         savedProfile = normalizePlannerDirectProfile({ ...draft, secretId });
+        const activateReady = options?.activateReady !== false;
+        const profileReady = isPlannerDirectProfileReady(savedProfile);
+        const selectionChanged = previousSelectedId !== savedProfile.id;
         const nextProfiles = existing
             ? profiles.map(profile => profile.id === existing.id ? savedProfile : profile)
             : [...profiles, savedProfile];
         settings.plannerDirectProfiles = normalizePlannerDirectProfiles(nextProfiles).map(profile => ({ ...profile }));
         settings.plannerDirectProfileId = savedProfile.id;
-        settings.plannerConnectionMode = PLANNER_CONNECTION_MODES.DIRECT;
+        settings.plannerConnectionMode = profileReady && activateReady
+            ? PLANNER_CONNECTION_MODES.DIRECT
+            : previousMode === PLANNER_CONNECTION_MODES.DIRECT && (!profileReady || selectionChanged)
+                ? PLANNER_CONNECTION_MODES.CURRENT
+                : previousMode;
         normalizeSettings(settings);
         hostSendLock.assertSafe();
 
@@ -4903,9 +4941,13 @@ async function savePlannerDirectProfile() {
                 cleanupWarning = [cleanupWarning, String(error.message || error)].filter(Boolean).join(' ');
             }
         }
+        const profileReady = isPlannerDirectProfileReady(savedProfile);
         if (cleanupWarning) {
-            setPlannerDirectStatus('saved', `配置已保存；${cleanupWarning}`);
+            setPlannerDirectStatus(profileReady ? 'saved' : 'dirty', `${profileReady ? '配置' : '凭据草稿'}已保存；${cleanupWarning}`);
             toastr.warning('配置已保存，但有 Key 状态未自动改变；请按状态提示检查酒馆密钥管理器。', DISPLAY_NAME);
+        } else if (!profileReady) {
+            setPlannerDirectStatus('dirty', '凭据草稿已保存；请选择模型并再次保存，配置才会启用。');
+            toastr.success(`副 API 凭据草稿“${savedProfile.name}”已保存`, DISPLAY_NAME);
         } else {
             toastr.success(`副 API 配置“${savedProfile.name}”已保存并选中`, DISPLAY_NAME);
         }
@@ -4916,6 +4958,7 @@ async function savePlannerDirectProfile() {
         hostSendLock = null;
         releasePlannerDirectCredentialRequestGuard(credentialRequestGuard, credentialStateSafe);
     }
+    return savedProfile;
 }
 
 async function deletePlannerDirectProfile() {
@@ -5038,23 +5081,43 @@ async function fetchPlannerDirectModels() {
         toastr.warning('隐藏研究正在运行，请等待本轮结束后再拉取模型列表');
         return;
     }
-    const settings = getSettings();
-    const profile = getSelectedPlannerDirectProfile(settings);
-    if (!profile) {
-        toastr.warning('请先保存并选择一个带有效 Key 的副 API 配置');
-        return;
-    }
-    let formUrl;
+    let settings = getSettings();
+    const editingId = String($('#hwr_planner_direct_connection').val() || '');
+    let profile = getPlannerDirectProfileMetadata(settings, editingId);
+    let formDraft;
     try {
-        formUrl = normalizePlannerDirectApiUrl($('#hwr_planner_direct_url').val());
+        formDraft = normalizePlannerDirectProfile({
+            id: profile?.id || 'pending-model-list-draft',
+            name: $('#hwr_planner_direct_name').val(),
+            apiUrl: $('#hwr_planner_direct_url').val(),
+            model: $('#hwr_planner_direct_model').val(),
+            secretId: profile?.secretId || '',
+        });
     } catch (error) {
         toastr.warning(String(error.message || error), DISPLAY_NAME);
         return;
     }
-    if (formUrl !== profile.apiUrl) {
-        toastr.warning('URL 有未保存修改，请先保存配置再拉取模型列表');
+    const hasUnsavedKey = Boolean(String($('#hwr_planner_direct_key').val() || '').trim());
+    const needsSave = !profile
+        || hasUnsavedKey
+        || !plannerDirectSecretExists(profile.secretId)
+        || profile.name !== formDraft.name
+        || profile.apiUrl !== formDraft.apiUrl
+        || profile.model !== formDraft.model;
+    if (needsSave) {
+        setPlannerDirectModelListStatus('saving', '正在安全保存端点与 Key；模型尚可留空…');
+        profile = await savePlannerDirectProfile({ activateReady: false });
+        if (!profile) {
+            setPlannerDirectModelListStatus('idle', '配置未保存，因此没有拉取模型列表。');
+            return;
+        }
+        settings = getSettings();
+    }
+    if (!profile || !plannerDirectSecretExists(profile.secretId)) {
+        toastr.warning('请先提供有效 API Key；模型 ID 可以暂时留空', DISPLAY_NAME);
         return;
     }
+    const formUrl = profile.apiUrl;
     plannerDirectModelListLocked = true;
     const button = $('#hwr_fetch_planner_direct_models').prop('disabled', true).attr('aria-busy', 'true');
     setPlannerDirectModelListStatus('loading', '正在从已保存端点拉取模型列表…');
@@ -5086,7 +5149,7 @@ async function fetchPlannerDirectModels() {
             models.push(id);
             if (models.length >= 1000) break;
         }
-        const current = getSelectedPlannerDirectProfile(getSettings());
+        const current = getPlannerDirectProfileMetadata(getSettings());
         let currentFormUrl = '';
         try {
             currentFormUrl = normalizePlannerDirectApiUrl($('#hwr_planner_direct_url').val());
@@ -5094,6 +5157,7 @@ async function fetchPlannerDirectModels() {
             // An invalid or partially edited URL is stale by definition.
         }
         if (!current
+            || !plannerDirectSecretExists(current.secretId)
             || current.id !== profile.id
             || current.apiUrl !== profile.apiUrl
             || current.secretId !== profile.secretId
@@ -5254,7 +5318,7 @@ function updatePlannerConnectionUi(profiles = null) {
         return;
     }
     const selected = getPlannerDirectProfileMetadata(settings);
-    if (selected && plannerDirectSecretExists(selected.secretId)) {
+    if (selected && isPlannerDirectProfileReady(selected) && plannerDirectSecretExists(selected.secretId)) {
         $('#hwr_resolved_planner_connection').text(
             `规划执行：${getPlannerDirectDisplayLabel(selected)}；最终正文：当前回答模型（${mainLabel}）`,
         );
@@ -5478,7 +5542,7 @@ function bindSettingsUi() {
     $('#hwr_planner_direct_name, #hwr_planner_direct_model').on('input', markPlannerDirectFormDirty);
     $('#hwr_planner_direct_url').on('input', () => {
         markPlannerDirectFormDirty();
-        clearPlannerDirectModelList('URL 已修改；请先保存配置，再重新拉取模型列表。');
+        clearPlannerDirectModelList('URL 已修改；拉取模型列表时会先安全保存端点与 Key。');
     });
     $('#hwr_planner_direct_key').on('input', markPlannerDirectFormDirty);
     $('#hwr_save_planner_direct').on('click', savePlannerDirectProfile);
@@ -5706,6 +5770,23 @@ function bindSettingsUi() {
 globalThis.HiddenWebResearch_Intercept = hiddenWebResearchInterceptor;
 
 if (CLIENT_COMPATIBILITY.supported) {
+    eventSource.makeFirst(event_types.GENERATION_STARTED, (type, options, dryRun) => {
+        try {
+            const context = SillyTavern.getContext();
+            generationStartSnapshot = captureGenerationStartSnapshot({
+                type,
+                options,
+                dryRun,
+                chatId: context.chatId,
+                groupId: context.groupId,
+                chat: context.chat,
+                textareaValue: $('#send_textarea').val(),
+            });
+        } catch (error) {
+            generationStartSnapshot = null;
+            debugLog('Unable to capture generation-start snapshot; continuing without preview guard', error);
+        }
+    });
     // Register passively at startup as well as reordering at transaction start:
     // an event already waiting in another async listener keeps this callback in
     // its snapshot and will observe a credential guard opened in the meantime.
@@ -5719,13 +5800,16 @@ if (CLIENT_COMPATIBILITY.supported) {
         enforcePlannerDirectCredentialWindowRequest,
     );
     eventSource.on(event_types.GENERATION_ENDED, () => {
+        generationStartSnapshot = null;
         invalidateRun('Generation ended');
     });
     eventSource.on(event_types.GENERATION_STOPPED, () => {
+        generationStartSnapshot = null;
         invalidateRun('Generation stopped');
         updateStatus('idle', '生成已停止，临时研究已清理');
     });
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        generationStartSnapshot = null;
         invalidateRun('Chat changed', { clearCaches: true });
         updateStatus('idle', '聊天已切换，临时研究已清理');
     });

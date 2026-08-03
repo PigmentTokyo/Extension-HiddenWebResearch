@@ -35,6 +35,16 @@ function normalizeOptionalSecretId(value) {
     return normalized;
 }
 
+function normalizeOptionalModelId(value) {
+    const normalized = String(value ?? '').trim();
+    if (!normalized) return '';
+    if (CONTROL_CHARACTERS.test(normalized)) throw new Error('Planner direct model ID contains control characters');
+    if (normalized.length > MODEL_ID_MAX_CHARS) {
+        throw new Error(`Planner direct model ID exceeds ${MODEL_ID_MAX_CHARS} characters`);
+    }
+    return rejectCredentialMaterial(normalized, 'Planner direct model ID');
+}
+
 export function containsPlannerDirectCredentialMaterial(value) {
     const text = String(value ?? '');
     return CREDENTIAL_PATTERNS.some(pattern => pattern.test(text));
@@ -86,8 +96,9 @@ export function normalizePlannerDirectApiUrl(value) {
 /**
  * Produces the only metadata shape that may be persisted for a direct planner.
  * Unknown properties (including apiKey/key/token) are intentionally discarded.
- * A blank secretId is retained so imported metadata can be shown as needing a
- * new key, but such a profile is not request-ready.
+ * Blank model and secretId values are retained so a credential-only draft can
+ * be saved before fetching the endpoint's model list. Such a draft is never
+ * request-ready.
  *
  * @param {unknown} value Raw profile metadata
  * @returns {{id: string, name: string, apiUrl: string, model: string, secretId: string}}
@@ -109,10 +120,7 @@ export function normalizePlannerDirectProfile(value) {
             'Planner direct profile name',
         ),
         apiUrl: normalizePlannerDirectApiUrl(value.apiUrl),
-        model: rejectCredentialMaterial(
-            normalizeRequiredText(value.model, 'Planner direct model ID', MODEL_ID_MAX_CHARS),
-            'Planner direct model ID',
-        ),
+        model: normalizeOptionalModelId(value.model),
         secretId: normalizeOptionalSecretId(value.secretId),
     });
 }
@@ -150,7 +158,8 @@ export function normalizePlannerDirectProfiles(value) {
  */
 export function isPlannerDirectProfileReady(value) {
     try {
-        return Boolean(normalizePlannerDirectProfile(value).secretId);
+        const profile = normalizePlannerDirectProfile(value);
+        return Boolean(profile.model && profile.secretId);
     } catch {
         return false;
     }

@@ -95,7 +95,23 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
-assert.equal(manifest.version, '1.12.0');
+assert.match(indexSource, /from '\.\/generation-request-guard\.js'/u);
+assert.match(indexSource, /eventSource\.makeFirst\(event_types\.GENERATION_STARTED/u);
+const interceptorStart = indexSource.indexOf('async function hiddenWebResearchInterceptor');
+const interceptorEnd = indexSource.indexOf('globalThis.HiddenWebResearch_Intercept', interceptorStart);
+assert.ok(interceptorStart >= 0 && interceptorEnd > interceptorStart);
+const interceptorSource = indexSource.slice(interceptorStart, interceptorEnd);
+const syntheticGuardStart = interceptorSource.indexOf('shouldSkipSyntheticGeneration({');
+const runActivationStart = interceptorSource.indexOf('activeRunEpoch = epoch;');
+const structuredResearchStart = interceptorSource.indexOf('runStructuredSearchResearch({');
+assert.ok(syntheticGuardStart >= 0, 'the synthetic request guard must run inside the interceptor');
+assert.ok(runActivationStart > syntheticGuardStart, 'preview requests must be filtered before opening a research run');
+assert.ok(
+    structuredResearchStart > syntheticGuardStart,
+    'preview requests must be filtered before starting search research',
+);
+
+assert.equal(manifest.version, '1.12.1');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -108,6 +124,9 @@ assert.match(indexSource, /const SETTINGS_KEY = 'hiddenWebResearch'/u);
 assert.match(indexSource, /const PROMPT_KEY = '___HiddenWebResearch___'/u);
 assert.match(readme, /^# P1G搜（颜料搜） for SillyTavern$/mu);
 assert.match(readme, /https:\/\/github\.com\/PigmentTokyo\/Extension-HiddenWebResearch/u);
+assert.match(readme, /凭据草稿不可执行/u);
+assert.match(readme, /JS-Slash-Runner Prompt Viewer/u);
+assert.match(visibleSettingsHtml, /模型 ID 可留空：点击后会先安全保存 URL\/Key 凭据草稿再拉取/u);
 assert.match(indexSource, /schemaVersion:\s*12/u);
 assert.match(indexSource, /strategyCustomPromptEnabled:\s*false/u);
 assert.match(indexSource, /strategyCustomPrompt:\s*''/u);

@@ -145,6 +145,8 @@ Selenium Plugin 同样只返回聚合正文与候选链接，不能提供可靠�
 
 不想先建立 Connection Profile 时，可以直接在扩展里填写 OpenAI-compatible Base URL、精确模型 ID 和 Key。该路径只使用原版 SillyTavern 已有的 Custom Chat Completion 与 secrets 接口，不增加后端路由，不修改核心文件，也不需要 server plugin。
 
+首次配置时可先填写名称、Base URL 和 Key，把模型 ID 留空后直接点击“拉取模型列表”。扩展会先通过原版 secrets 流程安全保存 URL/Key 凭据草稿，再使用该草稿读取模型；凭据草稿不可执行，也不会自动启用直连规划。选择精确模型 ID 并再次点击“保存配置”后，该配置才会成为可用的副规划器。
+
 - 最多保存 20 组命名配置；选择另一项只会改变下一次隐藏规划请求所引用的 URL、模型和精确 `secret-id`，不会修改当前回答模型的 URL 或模型。Custom 活动密钥槽的首次写入副作用见下条。
 - Key 写入当前 SillyTavern 用户的服务端 `SECRET_KEYS.CUSTOM` secrets。扩展设置只保存 `{ id, name, apiUrl, model, secretId }` 元数据，密码框保存后清空，明文 Key 不会回显，也不会写入扩展设置、缓存或聊天。
 - 原版 `/api/secrets/write` 会把新 Key 设为活动 Custom Key。若保存前已有活动项，扩展只有在活动项仍是刚写入的新 Key 时才恢复旧项，避免覆盖另一标签页或扩展的后续轮换；若保存前整个 Custom 槽为空，原版酒馆要求非空槽恰有一个活动项，因此新规划 Key 会持续成为全局活动 Custom Key。插件不会改变主模型 URL 或模型，但以后任何没有精确 `secret-id` 的 Custom 请求可能把它发送到自己的 Custom URL。首次空槽保存会二次确认；不接受该共享槽副作用时请取消并改用合适来源的 Connection Manager Profile，或先建立希望保持活动的 Custom Key。保存期间不要在其他标签页并行生成或改 Custom Key；选择已有配置本身不会轮换 Key。
@@ -238,7 +240,13 @@ Extras API 与 Selenium Plugin 是例外：由于它们无法给聚合正文提�
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.12.0`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.12.1`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.12.1`：
+
+- 首次配置插件内直连副 API 时，模型 ID 可以留空并直接点击“拉取模型列表”；扩展会先通过原版 secrets 流程安全保存 URL/Key 凭据草稿，再读取模型列表；
+- 凭据草稿不可执行，也不会自动启用直连规划；选定精确模型 ID 并再次保存配置后才会成为可用副规划器；
+- 在任何规划或搜索开始前拦截 JS-Slash-Runner Prompt Viewer 的假 `Generate` 预览，并以“没有新增用户回合”的保守规则兜底；真实发送、重生成/滑动与群聊不受影响。
 
 `1.12.0`：
 
