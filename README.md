@@ -66,6 +66,8 @@ Z.AI 不在支持列表中，也没有凭据入口或可调用路径。Extras/Se
 默认推荐。扩展调用原版 SillyTavern 的 `POST /api/search/searxng`，解析搜索结果页面中的标题、URL、日期和摘要。
 
 当前路径不会继续打开并阅读完整网页，因此它属于摘要级研究，不是 Claude/Gemini 原生页面阅读能力的复制。SearXNG Base URL 应使用可信地址；在多人或公网酒馆上允许普通用户任意修改该地址可能形成服务端请求风险。
+若所用客户端没有原版酒馆的 `/api/search/searxng` 路由（例如 TauriTavern 等 Tauri 客户端），可在设置中勾选「直连 SearXNG」；此时扩展直接从 SearXNG 获取 HTML，需要 SearXNG 入口允许跨域（`Access-Control-Allow-Origin`，例如在其前加带 CORS 头的反向代理）。
+
 
 ### SerpAPI Google Search
 
