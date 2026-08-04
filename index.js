@@ -178,6 +178,7 @@ const defaultSettings = {
     researchBackend: 'searxng',
     searxngUrl: '',
     searxngPreferences: '',
+    searxngDirectFetch: false,
     anysearchZone: '',
     anysearchLanguage: '',
     serpapiLanguage: '',
@@ -2244,16 +2245,26 @@ async function searchSearxng(query, settings) {
         return cached.result;
     }
 
-    const response = await runAbortableRequest(signal => fetch('/api/search/searxng', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            baseUrl,
-            query,
-            preferences,
-        }),
-        signal,
-    }), settings.requestTimeoutMs);
+    // ponytail: TauriTavern 等客户端没有原版酒馆的 /api/search/searxng 路由；
+    // 开启 searxngDirectFetch 时直连 SearXNG（需要 SearXNG 走带 CORS 头的入口，如反代）。
+    const response = await runAbortableRequest(signal => {
+        if (settings.searxngDirectFetch) {
+            const queryUrl = new URL('/search', baseUrl);
+            queryUrl.searchParams.set('q', query);
+            if (preferences) queryUrl.searchParams.set('preferences', preferences);
+            return fetch(queryUrl.toString(), { method: 'GET', signal });
+        }
+        return fetch('/api/search/searxng', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                baseUrl,
+                query,
+                preferences,
+            }),
+            signal,
+        });
+    }, settings.requestTimeoutMs);
 
     if (!response.ok) {
         throw new Error(`SearXNG request failed (${response.status})`);
@@ -5588,6 +5599,11 @@ function bindSettingsUi() {
     $('#hwr_searxng_preferences').val(settings.searxngPreferences).on('change', function () {
         settings.searxngPreferences = String($(this).val()).trim();
         invalidateRun('SearXNG preferences changed');
+        saveSettingsDebounced();
+    });
+    $('#hwr_searxng_direct_fetch').prop('checked', Boolean(settings.searxngDirectFetch)).on('change', function () {
+        settings.searxngDirectFetch = Boolean($(this).prop('checked'));
+        invalidateRun('SearXNG direct fetch changed');
         saveSettingsDebounced();
     });
     $('#hwr_extras_engine').val(settings.extrasEngine).on('change', function () {
