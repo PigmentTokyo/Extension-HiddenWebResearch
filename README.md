@@ -240,7 +240,13 @@ Extras API 与 Selenium Plugin 是例外：由于它们无法给聚合正文提�
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.12.1`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.12.2`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.12.2`：
+
+- 在“启用插件”和运行状态下新增默认收起的“详细设置”总折叠；搜索来源与原有六个设置分区只有在用户展开后才显示；
+- 选择搜索来源、测试失败，或插件已启用且检测到缺少来源 Key / 副规划器配置时，会自动展开总折叠和对应子项，避免关键错误被隐藏；
+- 不改变搜索、规划、注入、设置 schema 或 SillyTavern 1.13.3–1.18.x 兼容范围。
 
 `1.12.1`：
 

@@ -421,6 +421,23 @@
     margin-top: 10px;
 }
 
+.hwr_master_details {
+    margin-top: 2px;
+}
+
+.hwr_master_details > summary {
+    min-height: 42px;
+    background: rgba(128, 128, 128, 0.06);
+}
+
+.hwr_master_details > summary .hwr_summary_title {
+    font-size: 1.02em;
+}
+
+.hwr_master_details_body {
+    gap: 10px;
+}
+
 .hwr_advanced > .checkbox_label {
     margin-bottom: 10px;
 }

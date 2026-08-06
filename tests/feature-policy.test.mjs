@@ -111,7 +111,7 @@ assert.ok(
     'preview requests must be filtered before starting search research',
 );
 
-assert.equal(manifest.version, '1.12.1');
+assert.equal(manifest.version, '1.12.2');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -459,16 +459,22 @@ for (const [id, title, summaryId] of [
         new RegExp(`createSettingsSection\\('${id}', '${title}', '${summaryId}'\\)`, 'u'),
     );
 }
-for (const id of ['hwr_advanced_section', 'hwr_help_section']) {
+for (const id of ['hwr_details_section', 'hwr_advanced_section', 'hwr_help_section']) {
     assert.match(visibleSettingsHtml, new RegExp(`<details id="${id}" class="hwr_section`, 'u'));
 }
+assert.match(visibleSettingsHtml, /id="hwr_details_summary"/u);
+assert.match(visibleSettingsHtml, /class="hwr_section_body hwr_master_details_body"/u);
+assert.doesNotMatch(visibleSettingsHtml, /<details id="hwr_details_section"[^>]*\sopen(?:\s|>)/u);
+assert.match(indexSource, /const master = document\.getElementById\('hwr_details_section'\)/u);
+assert.match(indexSource, /if \(master instanceof HTMLDetailsElement\) master\.open = true/u);
+assert.match(indexSource, /#hwr_details_summary/u);
 const initializeSettingsLayoutCall = indexSource.lastIndexOf('initializeSettingsLayout();');
 const bindSettingsUiCall = indexSource.lastIndexOf('bindSettingsUi();');
 assert.ok(initializeSettingsLayoutCall >= 0);
 assert.ok(bindSettingsUiCall > initializeSettingsLayoutCall);
 assert.match(indexSource, /availableProfiles\.some\(profile => profile\.id === settings\.plannerProfileId\)/u);
-assert.match(indexSource, /if \(openSource \|\| \(openMissing && source\.missing\)\) openSettingsSection\('hwr_source_section'\)/u);
-assert.match(indexSource, /if \(openMissing && plannerMissing\) openSettingsSection\('hwr_planner_section'\)/u);
+assert.match(indexSource, /if \(openSource \|\| \(openMissing && settings\.enabled && source\.missing\)\) openSettingsSection\('hwr_source_section'\)/u);
+assert.match(indexSource, /if \(openMissing && settings\.enabled && plannerMissing\) openSettingsSection\('hwr_planner_section'\)/u);
 assert.match(indexSource, /const target = \/规划\|副 API\/u\.test\(String\(text\)\) \? 'hwr_planner_section' : 'hwr_source_section'/u);
 assert.match(indexSource, /bindCustomPromptUi\('strategy'\)/u);
 assert.match(indexSource, /bindCustomPromptUi\('trigger'\)/u);

@@ -1370,6 +1370,9 @@ function initializeSettingsLayout() {
 }
 
 function openSettingsSection(id) {
+    const master = document.getElementById('hwr_details_section');
+    if (master instanceof HTMLDetailsElement) master.open = true;
+
     const section = document.getElementById(id);
     if (section instanceof HTMLDetailsElement) section.open = true;
 }
@@ -1417,6 +1420,9 @@ function updateSettingsSectionSummaries({ openMissing = false, openSource = fals
         always: '每条消息',
         explicit: '仅明确要求',
     };
+    $('#hwr_details_summary').text(
+        source.label + ' · ' + (policyLabels[settings.searchPolicy] || settings.searchPolicy),
+    );
     const strategyText = String($('#hwr_adapter option:selected').text() || '自动识别')
         .split('：')[0]
         .trim();
@@ -1463,8 +1469,8 @@ function updateSettingsSectionSummaries({ openMissing = false, openSource = fals
         settings.maxRounds + ' 轮 · 最多 ' + settings.maxTotalQueries + ' 次查询',
     );
 
-    if (openSource || (openMissing && source.missing)) openSettingsSection('hwr_source_section');
-    if (openMissing && plannerMissing) openSettingsSection('hwr_planner_section');
+    if (openSource || (openMissing && settings.enabled && source.missing)) openSettingsSection('hwr_source_section');
+    if (openMissing && settings.enabled && plannerMissing) openSettingsSection('hwr_planner_section');
 }
 
 function debugLog(...args) {

@@ -18,6 +18,13 @@
                 <div id="hwr_status" data-state="idle">已关闭</div>
             </div>
 
+            <details id="hwr_details_section" class="hwr_section hwr_master_details">
+                <summary>
+                    <span class="hwr_summary_title">&#35814;&#32454;&#35774;&#32622;</span>
+                    <span id="hwr_details_summary" class="hwr_summary_meta" aria-live="polite"></span>
+                </summary>
+                <div class="hwr_section_body hwr_master_details_body">
+
             <label for="hwr_research_backend">搜索来源</label>
             <select id="hwr_research_backend" class="text_pole">
                 <option value="searxng">本机 SearXNG（适用于所有模型，推荐）</option>
@@ -614,6 +621,8 @@
                     <p>搜索资料只临时进入本轮模型请求，不写入聊天、附件、Data Bank、LocalStorage 或 IndexedDB；搜索词及必要上下文会发送给你选择的搜索服务和规划 API。</p>
                     <p>SerpAPI、Tavily、Serper 与直连规划 Key 存在 SillyTavern 服务端 secrets 中。插件调试日志不打印搜索正文，但原版酒馆、外部来源或可选组件可能按各自策略记录请求。</p>
                     <p>自动注入会优先使用隐藏工具历史；协议不兼容时改用中性隐藏研究包。Extras 与 Selenium 只能提供未逐条归因的聚合资料，因此始终使用研究包。</p>
+                </div>
+            </details>
                 </div>
             </details>
         </div>
