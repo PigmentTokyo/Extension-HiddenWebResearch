@@ -17,6 +17,29 @@ function hashText(value) {
     return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
+function getTransportMessageText(message) {
+    if (typeof message?.content === 'string') return message.content;
+    if (!Array.isArray(message?.content)) return '';
+    return message.content.map(part => {
+        if (typeof part === 'string') return part;
+        if (typeof part?.text === 'string') return part.text;
+        if (typeof part?.content === 'string') return part.content;
+        return '';
+    }).join('\n');
+}
+
+function normalizeComparableText(value) {
+    return String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+}
+
+function stripTransportBlockText(text, startMarker, endMarker) {
+    const start = text.indexOf(startMarker);
+    if (start < 0) return text;
+    const end = text.indexOf(endMarker, start + startMarker.length);
+    if (end < 0) return text;
+    return `${text.slice(0, start)}${text.slice(end + endMarker.length)}`;
+}
+
 function normalizeQueryList(queries, sources) {
     const explicit = Array.isArray(queries) ? queries : [];
     const inferred = Array.isArray(sources)
@@ -62,6 +85,36 @@ export function normalizeResearchTransport(value) {
 export function resolveResearchTransport(preference, toolCallingSupported) {
     const normalized = normalizeResearchTransport(preference);
     return normalized === 'auto' && Boolean(toolCallingSupported) ? 'tool' : 'prompt';
+}
+
+export function hasCurrentUserMessageForTransport(messages, {
+    markerMessageIndex,
+    startMarker,
+    endMarker,
+    userText,
+}) {
+    if (!Array.isArray(messages)) return false;
+    const expected = normalizeComparableText(userText);
+    if (!expected) return false;
+
+    const latestNonMarkerUser = messages.findLast((message, index) => (
+        index !== markerMessageIndex
+        && message?.role === 'user'
+        && message?.name !== 'example_user'
+        && !message?.is_example
+    ));
+    if (normalizeComparableText(getTransportMessageText(latestNonMarkerUser)).includes(expected)) {
+        return true;
+    }
+
+    const markerMessage = messages[markerMessageIndex];
+    if (markerMessage?.role !== 'user') return false;
+    const markerUserText = stripTransportBlockText(
+        getTransportMessageText(markerMessage),
+        startMarker,
+        endMarker,
+    );
+    return normalizeComparableText(markerUserText).includes(expected);
 }
 
 /**

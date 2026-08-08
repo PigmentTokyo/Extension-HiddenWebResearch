@@ -637,7 +637,7 @@ assert.match(indexSource, /from '\.\/planner-request-router\.js'/u);
 assert.match(indexSource, /from '\.\/planner-direct-profiles\.js'/u);
 assert.match(indexSource, /from '\.\/planner-direct-transactions\.js'/u);
 assert.match(indexSource, /supportsPlannerDirectSecretId,/u);
-assert.match(indexSource, /schemaVersion:\s*12/u);
+assert.match(indexSource, /schemaVersion:\s*13/u);
 assert.match(indexSource, /plannerConnectionMode:\s*PLANNER_CONNECTION_MODES\.CURRENT/u);
 assert.match(indexSource, /plannerProfileId:\s*''/u);
 assert.match(indexSource, /plannerDirectProfileId:\s*''/u);

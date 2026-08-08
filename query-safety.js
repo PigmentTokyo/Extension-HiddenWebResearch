@@ -40,6 +40,8 @@ const EXPLICIT_SEARCH_TARGET_PATTERNS = Object.freeze([
     /(?:请|帮我|麻烦)(?:联网|上网|网页|网络|网上|在线)?(?:搜索|搜一下|查询|查一下|检索|查证|核实|搜索一下|查询一下)\s*(?:一下|有关|关于)?\s*[:：]?\s*([^。！？!?；;\n]{2,120})/giu,
     /\b(?:please\s+)?(?:search(?:\s+the)?\s+(?:web|internet)(?:\s+for)?|search\s+for|look\s+up|verify\s+online)\s+([^.!?;\n]{2,120})/giu,
 ]);
+const PURPOSE_PREFIX_PATTERN = /^(?:(?:to\s+)?(?:verify|check|find|look\s+up|research|confirm|identify|determine|establish)|(?:查证|核实|确认|查找|寻找|了解|调查|检索|搜索))\s*[:：\-]?\s*/iu;
+const GENERIC_PURPOSE_PATTERN = /^(?:(?:the\s+)?(?:user|current|latest)\s+(?:request|input|question|message)|(?:specific\s+)?(?:evidence|information|facts?|details?|sources?|accuracy|current\s+behavior|official\s+docs?)|primary|independent|recency|contradiction|gap[ _-]?fill|(?:用户|本轮|当前|最新)(?:请求|输入|问题|消息|内容)|(?:相关)?(?:信息|事实|细节|资料|来源|准确性|真实性))$/iu;
 
 function normalizeCredentialCandidate(value) {
     return String(value || '').trim().replace(/^[<"']+|[>"']+$/gu, '');
@@ -200,6 +202,27 @@ export function validateSearchQueryCandidate(value, {
         }
     }
     return { valid: true, query, reason: cleaned.wrapperRemoved ? 'wrapper_removed' : 'ok' };
+}
+
+/**
+ * Recovers a concise query from the planner's evidence-purpose field when its
+ * query field copied the full user turn. Generic labels fail closed.
+ */
+export function buildSafePurposeFallbackQuery(value, {
+    userRequest = '',
+    maxLength = SEARCH_QUERY_HARD_MAX_CHARS,
+} = {}) {
+    const original = String(value || '');
+    if (containsSensitiveQueryMaterial(original)) return '';
+    const cleaned = cleanSearchQueryText(original);
+    if (cleaned.userInputWrapperRemoved) return '';
+    const purpose = cleaned.text.replace(PURPOSE_PREFIX_PATTERN, '').trim();
+    if (!purpose || GENERIC_PURPOSE_PATTERN.test(purpose)) return '';
+    const validation = validateSearchQueryCandidate(purpose, {
+        userRequest,
+        maxLength,
+    });
+    return validation.valid ? validation.query : '';
 }
 
 function extractExplicitSearchTarget(value, maxLength) {

@@ -89,10 +89,13 @@ assert.deepEqual(resolveResearchBackendSelection('', false), {
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const plannerPromptsSource = await readFile(new URL('../planner-prompts.js', import.meta.url), 'utf8');
 const querySafetySource = await readFile(new URL('../query-safety.js', import.meta.url), 'utf8');
+const researchInjectionSource = await readFile(new URL('../research-injection.js', import.meta.url), 'utf8');
 const researchTransportSource = await readFile(new URL('../research-transport.js', import.meta.url), 'utf8');
+const searchLogSource = await readFile(new URL('../search-log.js', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 const settingsHtml = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
+const styleSource = await readFile(new URL('../style.css', import.meta.url), 'utf8');
 const visibleSettingsHtml = settingsHtml.replace(/<!--[\s\S]*?-->/gu, '');
 
 assert.match(indexSource, /from '\.\/generation-request-guard\.js'/u);
@@ -111,7 +114,7 @@ assert.ok(
     'preview requests must be filtered before starting search research',
 );
 
-assert.equal(manifest.version, '1.12.3');
+assert.equal(manifest.version, '1.13.0');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -127,7 +130,7 @@ assert.match(readme, /https:\/\/github\.com\/PigmentTokyo\/Extension-HiddenWebRe
 assert.match(readme, /凭据草稿不可执行/u);
 assert.match(readme, /JS-Slash-Runner Prompt Viewer/u);
 assert.match(visibleSettingsHtml, /模型 ID 可留空：点击后会先安全保存 URL\/Key 凭据草稿再拉取/u);
-assert.match(indexSource, /schemaVersion:\s*12/u);
+assert.match(indexSource, /schemaVersion:\s*13/u);
 assert.match(indexSource, /strategyCustomPromptEnabled:\s*false/u);
 assert.match(indexSource, /strategyCustomPrompt:\s*''/u);
 assert.match(indexSource, /triggerCustomPromptEnabled:\s*false/u);
@@ -235,7 +238,7 @@ assert.equal((indexSource.match(/normalizeLegacyBrowserSearchResponse\(payload, 
 assert.match(indexSource, /forcePromptTransport \|\|= Boolean\(result\.forcePromptTransport\)/u);
 assert.match(
     indexSource,
-    /const transport = researchResult\.forcePromptTransport\s*\? 'prompt'\s*:\s*resolveResearchTransport/u,
+    /const transport = settings\.resultInjectionPosition === 'variable'[\s\S]*?\? 'prompt'[\s\S]*?: researchResult\.forcePromptTransport[\s\S]*?\? 'prompt'[\s\S]*?: resolveResearchTransport/u,
 );
 assert.match(indexSource, /Aggregate summaries and candidate URL lists are not mapped to each other/u);
 
@@ -267,7 +270,7 @@ assert.match(indexSource, /extension_prompt_types\.IN_CHAT/u);
 assert.match(indexSource, /extension_prompt_roles\.SYSTEM/u);
 assert.match(
     indexSource,
-    /setExtensionPrompt\(\s*PROMPT_KEY,\s*value,\s*extension_prompt_types\.IN_CHAT,\s*0,\s*false,\s*extension_prompt_roles\.SYSTEM,\s*\)/u,
+    /setExtensionPrompt\(\s*PROMPT_KEY,\s*safeValue,\s*placement\.position,\s*placement\.depth,\s*false,\s*placement\.role,\s*\)/u,
 );
 assert.doesNotMatch(
     indexSource,
@@ -323,10 +326,30 @@ assert.match(indexSource, /\['makersuite', 'vertexai', 'google'\]/u);
 assert.match(indexSource, /if \(isGemini3\) return false/u);
 assert.match(indexSource, /if \(normalizedSource === 'deepseek'\) return true/u);
 assert.match(indexSource, /activePromptInjection && hasInjectedResearchMarker\(request\)/u);
+assert.match(indexSource, /applyActiveVariableInjection\(request, \{ finalChance: true \}\)/u);
+assert.match(indexSource, /applyActiveVariableInjection\(payload, \{ finalChance: true \}\)/u);
+assert.doesNotMatch(indexSource, /function handleGenerateAfterData\([^)]*dryRun[^)]*\)\s*\{\s*if \(dryRun\) return/u);
+assert.match(indexSource, /eventSource\.on\(event_types\.GENERATE_AFTER_DATA, handleGenerateAfterData\)/u);
+assert.match(indexSource, /state\.store\[name\] = slotMarker/u);
+assert.match(indexSource, /pending\.store\[pending\.name\] !== pending\.slotMarker/u);
+assert.match(indexSource, /const safeValue = value \? neutralizeSillyTavernMacros\(value\) : ''/u);
+assert.match(researchInjectionSource, /replaceAll\('\{\{', '｛｛'\)/u);
+assert.match(researchInjectionSource, /replaceAll\('\}\}', '｝｝'\)/u);
+assert.match(indexSource, /const fallbackPacket = `\$\{fallbackStartMarker\}\\n\$\{String\(packet\)\}\\n\$\{fallbackEndMarker\}`/u);
+assert.match(indexSource, /setExtensionPrompt\([\s\S]*?PROMPT_KEY,[\s\S]*?fallbackPacket/u);
+assert.doesNotMatch(indexSource, /payload\.messages\.push\(\{ role: 'user', content: pending\.packet \}\)/u);
+assert.doesNotMatch(indexSource, /setLocalVariable\(|setGlobalVariable\(/u);
+assert.match(researchInjectionSource, /replaceEphemeralResultMarkers/u);
+assert.match(researchInjectionSource, /replaceAll\(slotMarker, \(\) =>/u);
+assert.match(researchInjectionSource, /const useVariableSlot = slotOccurrences > 0 && hasBudgetedFallback/u);
+assert.match(researchInjectionSource, /if \(!hasBudgetedFallback\) return ''/u);
+assert.match(researchInjectionSource, /remainingSlotOccurrences === 0 \? packet : ''/u);
+assert.doesNotMatch(indexSource, /markerMessage\.role === 'system'/u);
+assert.match(indexSource, /hasCurrentUserMessageForTransport\(request\.messages/u);
 assert.match(indexSource, /isCompatibleGenerationRequest\(request, HANDLED_GENERATION_TYPES\)/u);
 assert.match(indexSource, /String\(request\.type \|\| ''\) !== String\(pending\.type \|\| ''\)/u);
-assert.match(indexSource, /request\.messages\.findLast/u);
-assert.match(indexSource, /message\?\.name !== 'example_user'/u);
+assert.match(researchTransportSource, /messages\.findLast/u);
+assert.match(researchTransportSource, /message\?\.name !== 'example_user'/u);
 assert.match(indexSource, /typeof item\.content === 'string'/u);
 assert.match(indexSource, /request\.enable_web_search = false/u);
 assert.match(
@@ -352,11 +375,14 @@ assert.match(indexSource, /searchPolicy:\s*settings\.searchPolicy/u);
 assert.match(indexSource, /evidence\.length && decision\.unresolved\.length/u);
 assert.match(indexSource, /if \(unresolvedGaps\.length\) \{\s*researchPartial = true/u);
 assert.match(indexSource, /buildSafeFallbackQuery\(userText, 120\)/u);
+assert.match(indexSource, /buildSafePurposeFallbackQuery/u);
+assert.match(indexSource, /Recovered a blocked planner query from its concise evidence purpose/u);
 assert.match(indexSource, /validateSearchQueryCandidate\(preparedQuery\.logicalQuery/u);
 assert.match(indexSource, /validateSearchQueryCandidate\(preparedQuery\.executedQuery/u);
 assert.match(indexSource, /maxLength: 120,/u);
 assert.match(indexSource, /The previous proposed query was rejected because it copied or wrapped the user input/u);
-assert.match(indexSource, /规划查询过长或复制了用户正文，已阻止发送并继续普通生成/u);
+assert.match(indexSource, /requestSaferQueryReplan/u);
+assert.match(indexSource, /规划器连续未能生成安全短查询，已跳过搜索并继续普通生成/u);
 assert.match(indexSource, /containsSensitiveQueryMaterial\(query\)/u);
 assert.match(indexSource, /blockedUnsafeQueries/u);
 assert.match(indexSource, /blockedThisDecision/u);
@@ -401,6 +427,14 @@ assert.match(visibleSettingsHtml, /<option value="gemini">Gemini /u);
 assert.match(visibleSettingsHtml, /id="hwr_result_transport"/u);
 assert.match(visibleSettingsHtml, /隐藏工具结果优先/u);
 assert.match(visibleSettingsHtml, /固定使用隐藏研究包/u);
+assert.match(visibleSettingsHtml, /id="hwr_result_injection_position"/u);
+assert.match(visibleSettingsHtml, /value="variable">指定酒馆变量槽/u);
+assert.match(visibleSettingsHtml, /id="hwr_result_injection_role"/u);
+assert.match(visibleSettingsHtml, /id="hwr_result_injection_depth"/u);
+assert.match(visibleSettingsHtml, /id="hwr_result_variable_scope"/u);
+assert.match(visibleSettingsHtml, /id="hwr_result_variable_name"/u);
+assert.match(visibleSettingsHtml, /\{\{getvar::p1g_search_result\}\}/u);
+assert.match(visibleSettingsHtml, /不会把搜索资料保存进酒馆变量/u);
 assert.match(visibleSettingsHtml, /SillyTavern 1\.13\.3.*1\.18\.x/u);
 assert.match(visibleSettingsHtml, /<option value="serpapi">/u);
 for (const id of [
@@ -467,6 +501,52 @@ for (const [id, title, summaryId] of [
 for (const id of ['hwr_details_section', 'hwr_advanced_section', 'hwr_help_section']) {
     assert.match(visibleSettingsHtml, new RegExp(`<details id="${id}" class="hwr_section`, 'u'));
 }
+for (const id of [
+    'hwr_search_log_section',
+    'hwr_search_log_summary',
+    'hwr_search_log_privacy',
+    'hwr_copy_search_log',
+    'hwr_clear_search_log',
+    'hwr_search_log_empty',
+    'hwr_search_log_entries',
+]) {
+    assert.match(visibleSettingsHtml, new RegExp(`id="${id}"`, 'u'));
+}
+assert.match(visibleSettingsHtml, /仅保存在当前页签内存/u);
+assert.match(visibleSettingsHtml, /最近 40 次、合计 200,000 字符/u);
+assert.match(visibleSettingsHtml, /不保存原始响应、请求头或 Key/u);
+assert.match(visibleSettingsHtml, /部分结果可能因去重或证据预算未进入最终提示/u);
+assert.match(visibleSettingsHtml, /role="region" aria-label="搜索日志列表"/u);
+assert.doesNotMatch(visibleSettingsHtml, /<details id="hwr_search_log_section"[^>]*\sopen(?:\s|>)/u);
+assert.match(indexSource, /searchStructuredBackendWithLog\(query, settings, 'research', logGeneration\)/u);
+assert.match(indexSource, /searchStructuredBackendWithLog\('SillyTavern', \{/u);
+assert.match(indexSource, /\}, 'test', logGeneration\);/u);
+assert.match(indexSource, /recordResearchCacheReuse\(cachedResearch, settings\.researchBackend, logGeneration\)/u);
+assert.match(indexSource, /async function runStructuredSearchResearch\(\{[^)]*\}\) \{\s*const logGeneration = searchLogGeneration;/u);
+assert.match(indexSource, /async function testStructuredSearchConnection\(backend\) \{\s*const logGeneration = searchLogGeneration;/u);
+assert.match(indexSource, /#hwr_copy_search_log'\)\.on\('click', copySearchLogToClipboard\)/u);
+assert.match(indexSource, /#hwr_clear_search_log'\)\.on\('click'/u);
+assert.match(indexSource, /Clipboard API rejected search log copy; trying compatibility fallback/u);
+assert.match(indexSource, /finally \{\s*textarea\.remove\(\);\s*\}/u);
+assert.match(styleSource, /\.hwr_search_log_entry_summary::after/u);
+assert.match(styleSource, /\.hwr_search_log_entry\[open\] > \.hwr_search_log_entry_summary::after/u);
+const chatChangedHandler = indexSource.slice(
+    indexSource.indexOf('eventSource.on(event_types.CHAT_CHANGED'),
+    indexSource.indexOf('if (ENABLE_SERVER_DEPENDENT_FEATURES)', indexSource.indexOf('eventSource.on(event_types.CHAT_CHANGED')),
+);
+assert.match(chatChangedHandler, /clearSearchLog\(\)/u);
+assert.match(indexSource, /\.text\(entry\.query/u);
+assert.match(indexSource, /rel: 'noopener noreferrer nofollow'/u);
+assert.match(searchLogSource, /SEARCH_LOG_LIMIT = 40/u);
+assert.match(searchLogSource, /SEARCH_LOG_CHARACTER_LIMIT = 200000/u);
+assert.match(searchLogSource, /\['http:', 'https:'\]/u);
+assert.match(searchLogSource, /parsed\.username \|\| parsed\.password/u);
+assert.doesNotMatch(searchLogSource, /localStorage|indexedDB|extension_settings|chat_metadata|headers|cacheKey|rawResponse/iu);
+const defaultSettingsSource = indexSource.slice(
+    indexSource.indexOf('const defaultSettings'),
+    indexSource.indexOf('};', indexSource.indexOf('const defaultSettings')) + 2,
+);
+assert.doesNotMatch(defaultSettingsSource, /searchLog/u);
 assert.match(visibleSettingsHtml, /id="hwr_details_summary"/u);
 assert.match(visibleSettingsHtml, /class="hwr_section_body hwr_master_details_body"/u);
 assert.doesNotMatch(visibleSettingsHtml, /<details id="hwr_details_section"[^>]*\sopen(?:\s|>)/u);

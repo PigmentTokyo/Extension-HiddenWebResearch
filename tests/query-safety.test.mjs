@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import {
+    buildSafePurposeFallbackQuery,
     buildSafeFallbackQuery,
     compactSearchRequest,
     containsSensitiveQueryMaterial,
@@ -58,6 +59,15 @@ assert.deepEqual(
     validateSearchQueryCandidate('艾莉丝 官方角色设定 睡眠习惯', { userRequest: copiedNarrative }),
     { valid: true, query: '艾莉丝 官方角色设定 睡眠习惯', reason: 'ok' },
 );
+assert.equal(
+    buildSafePurposeFallbackQuery('查证：艾莉丝 官方角色设定 睡眠习惯', {
+        userRequest: copiedNarrative,
+    }),
+    '艾莉丝 官方角色设定 睡眠习惯',
+);
+assert.equal(buildSafePurposeFallbackQuery('核实用户请求', { userRequest: copiedNarrative }), '');
+assert.equal(buildSafePurposeFallbackQuery('primary', { userRequest: copiedNarrative }), '');
+assert.equal(buildSafePurposeFallbackQuery(copiedNarrative, { userRequest: copiedNarrative }), '');
 
 assert.equal(
     buildSafeFallbackQuery(`${'剧情描述 '.repeat(80)}请搜索：艾莉丝 官方角色设定`, 220),

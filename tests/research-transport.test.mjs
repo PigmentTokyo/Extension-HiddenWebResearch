@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
     buildCompletedClientToolMessages,
     buildClientWebSearchInvocations,
+    hasCurrentUserMessageForTransport,
     normalizeResearchTransport,
     resolveResearchTransport,
 } from '../research-transport.js';
@@ -12,6 +13,38 @@ assert.equal(normalizeResearchTransport('unexpected'), 'auto');
 assert.equal(resolveResearchTransport('auto', true), 'tool');
 assert.equal(resolveResearchTransport('auto', false), 'prompt');
 assert.equal(resolveResearchTransport('prompt', true), 'prompt');
+
+const toolStartMarker = '<<<TOOL_BEGIN>>>';
+const toolEndMarker = '<<<TOOL_END>>>';
+assert.equal(hasCurrentUserMessageForTransport([
+    { role: 'user', content: 'What is the Tokyo weather tomorrow?' },
+    { role: 'user', content: `client policy\n${toolStartMarker}\nresults\n${toolEndMarker}` },
+], {
+    markerMessageIndex: 1,
+    startMarker: toolStartMarker,
+    endMarker: toolEndMarker,
+    userText: 'What is the Tokyo weather tomorrow?',
+}), true, 'a user-role envelope must not hide the real latest user message');
+assert.equal(hasCurrentUserMessageForTransport([
+    {
+        role: 'user',
+        content: `What is the Tokyo weather tomorrow?\nclient policy\n${toolStartMarker}\nresults\n${toolEndMarker}`,
+    },
+], {
+    markerMessageIndex: 0,
+    startMarker: toolStartMarker,
+    endMarker: toolEndMarker,
+    userText: 'What is the Tokyo weather tomorrow?',
+}), true, 'a merged user message should be checked after virtually removing the result block');
+assert.equal(hasCurrentUserMessageForTransport([
+    { role: 'user', content: 'an older unrelated request' },
+    { role: 'user', content: `${toolStartMarker}\nresults\n${toolEndMarker}` },
+], {
+    markerMessageIndex: 1,
+    startMarker: toolStartMarker,
+    endMarker: toolEndMarker,
+    userText: 'What is the Tokyo weather tomorrow?',
+}), false);
 
 const invocations = buildClientWebSearchInvocations({
     queries: ['Tokyo weather tomorrow', 'Tokyo rain forecast'],

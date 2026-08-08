@@ -195,6 +195,27 @@
     white-space: nowrap;
 }
 
+.hwr_injection_options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 1px dashed var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: rgba(128, 128, 128, 0.05);
+}
+
+.hwr_injection_options code {
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.hwr_nested_fields {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
 .hwr_advanced {
     margin-top: 4px;
     padding: 8px 0;
@@ -450,6 +471,155 @@
     margin: 0;
 }
 
+.hwr_search_log_entries {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: min(55vh, 520px);
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.hwr_search_log_entry {
+    overflow: hidden;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: rgba(128, 128, 128, 0.04);
+}
+
+.hwr_search_log_entry_summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 9px;
+    cursor: pointer;
+}
+
+.hwr_search_log_entry_summary::-webkit-details-marker {
+    display: none;
+}
+
+.hwr_search_log_entry_summary::after {
+    content: '›';
+    opacity: 0.68;
+    font-size: 1.2em;
+    line-height: 1;
+    transform: rotate(0deg);
+    transition: transform 120ms ease;
+}
+
+.hwr_search_log_entry[open] > .hwr_search_log_entry_summary::after {
+    transform: rotate(90deg);
+}
+
+.hwr_search_log_badge {
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(105, 197, 132, 0.16);
+    color: #69c584;
+    font-size: 0.78em;
+    white-space: nowrap;
+}
+
+.hwr_search_log_badge[data-state="cache"] {
+    background: rgba(91, 160, 214, 0.16);
+    color: #78b7e8;
+}
+
+.hwr_search_log_badge[data-state="error"] {
+    background: rgba(237, 106, 106, 0.16);
+    color: #ed6a6a;
+}
+
+.hwr_search_log_query,
+.hwr_search_log_snippet,
+.hwr_search_log_url,
+.hwr_search_log_entry_body,
+.hwr_search_log_entry pre,
+.hwr_search_log_entry code {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.hwr_search_log_query {
+    font-weight: 600;
+}
+
+.hwr_search_log_time {
+    opacity: 0.62;
+    font-size: 0.78em;
+    white-space: nowrap;
+}
+
+.hwr_search_log_entry_body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 9px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+}
+
+.hwr_search_log_meta,
+.hwr_search_log_date,
+.hwr_search_log_url {
+    opacity: 0.68;
+    font-size: 0.82em;
+}
+
+.hwr_search_log_query_block {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.hwr_search_log_query_block code,
+.hwr_search_log_entry pre {
+    display: block;
+    margin: 0;
+    padding: 7px 8px;
+    border-radius: 5px;
+    background: rgba(128, 128, 128, 0.09);
+    white-space: pre-wrap;
+}
+
+.hwr_search_log_results,
+.hwr_search_log_candidate_links {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding-left: 1.6em;
+}
+
+.hwr_search_log_results li {
+    padding-left: 2px;
+}
+
+.hwr_search_log_snippet {
+    margin-top: 3px;
+    line-height: 1.45;
+}
+
+.hwr_search_log_url {
+    margin-top: 2px;
+}
+
+.hwr_search_log_aggregate,
+.hwr_search_log_error {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.hwr_search_log_aggregate {
+    padding: 8px;
+    border-left: 3px solid #d5a84e;
+    border-radius: 4px;
+    background: rgba(213, 168, 78, 0.08);
+}
+
 @media (max-width: 600px) {
     .hwr_section > summary {
         align-items: flex-start;
@@ -458,5 +628,19 @@
     .hwr_summary_meta {
         max-width: 52%;
         white-space: nowrap;
+    }
+
+    .hwr_search_log_entry_summary {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+
+    .hwr_search_log_time {
+        grid-column: 2;
+        white-space: normal;
+    }
+
+    .hwr_search_log_entry_summary::after {
+        grid-column: 3;
+        grid-row: 1 / span 2;
     }
 }

@@ -194,6 +194,48 @@
                 自动模式优先使用隐藏工具历史，不兼容时回退隐藏研究包；使用 No Tools 的连接建议固定隐藏研究包。
             </div>
 
+            <label for="hwr_result_injection_position">研究上下文插入位置</label>
+            <select id="hwr_result_injection_position" class="text_pole">
+                <option value="chat">聊天记录内（推荐，深度可调）</option>
+                <option value="before_prompt">主提示词开头（最不利于前缀缓存）</option>
+                <option value="after_prompt">主提示词末尾</option>
+                <option value="variable">指定酒馆变量槽（由预设决定精确位置）</option>
+            </select>
+            <div id="hwr_chat_injection_options" class="hwr_injection_options">
+                <label for="hwr_result_injection_role">临时消息角色</label>
+                <select id="hwr_result_injection_role" class="text_pole">
+                    <option value="user">User（推荐，避免 system 被提升到开头）</option>
+                    <option value="system">System（指令权重高，但常被提升到开头）</option>
+                    <option value="assistant">Assistant（高级，不推荐）</option>
+                </select>
+                <div id="hwr_injection_depth_options" class="hwr_nested_fields">
+                    <label for="hwr_result_injection_depth">聊天深度</label>
+                    <input id="hwr_result_injection_depth" class="text_pole" type="number" min="0" max="100" step="1">
+                    <div class="hwr_hint">
+                        深度 0 位于最新聊天之后，最利于保留前面的稳定缓存；数值越大越靠前。System 即使选择深度 0，也可能被 Claude/Gemini 等转换器提升到请求开头。
+                    </div>
+                </div>
+            </div>
+            <div id="hwr_variable_injection_options" class="hwr_injection_options">
+                <label for="hwr_result_variable_scope">变量范围</label>
+                <select id="hwr_result_variable_scope" class="text_pole">
+                    <option value="local">当前聊天局部变量（推荐）</option>
+                    <option value="global">酒馆全局变量（高级）</option>
+                </select>
+                <label for="hwr_result_variable_name">专用变量名</label>
+                <input id="hwr_result_variable_name" class="text_pole" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="p1g_search_result">
+                <div class="hwr_notice hwr_warning">
+                    在预设希望插入资料的位置放入 <code id="hwr_result_variable_macro_example">{{getvar::p1g_search_result}}</code>。请为本插件使用一个专用变量；若误放多次，只会保留最后一处。放在主提示词开头仍会破坏前缀缓存，建议放在靠近聊天历史末尾的位置。
+                </div>
+                <div class="hwr_hint">
+                    插件不会把搜索资料保存进酒馆变量：变量只短暂收到一个随机标记。完整研究包会先在请求内存中计入一次 token 预算，正式请求构造完成后再移动到变量槽并立即恢复旧值；若本轮找不到占位符，会留在聊天末尾安全回退。
+                </div>
+            </div>
+            <div id="hwr_resolved_injection" class="hwr_hint"></div>
+            <div class="hwr_hint">
+                自动工具通道的 assistant/tool 配对始终追加在本轮末尾，不能任意移动；这里控制的是工具政策、可信时间与研究包的位置。需要完全精确的位置时，请固定研究包或使用变量槽。
+            </div>
+
             <label for="hwr_search_policy">触发策略</label>
             <select id="hwr_search_policy" class="text_pole">
                 <option value="auto">模型自动判断（会调用隐藏规划器，推荐）</option>
@@ -612,6 +654,30 @@
                     <input type="checkbox" id="hwr_debug">
                     <span>本扩展调试日志（不会打印搜索正文）</span>
                 </label>
+            </details>
+
+            <details id="hwr_search_log_section" class="hwr_section hwr_search_log">
+                <summary>
+                    <span class="hwr_summary_title">本页搜索日志</span>
+                    <span id="hwr_search_log_summary" class="hwr_summary_meta" aria-live="polite">暂无记录</span>
+                </summary>
+                <div class="hwr_section_body">
+                    <div id="hwr_search_log_privacy" class="hwr_notice">
+                        仅保存在当前页签内存，最多保留最近 40 次、合计 200,000 字符；切换聊天、刷新页面或手动清空后删除。只显示实际发送的关键词，以及搜索来源返回并通过规范化的结果；部分结果可能因去重或证据预算未进入最终提示。不保存原始响应、请求头或 Key。
+                    </div>
+                    <div class="hwr_button_row">
+                        <button id="hwr_copy_search_log" class="menu_button" type="button" disabled>
+                            <i class="fa-solid fa-copy"></i>
+                            <span>复制全部</span>
+                        </button>
+                        <button id="hwr_clear_search_log" class="menu_button" type="button" disabled>
+                            <i class="fa-solid fa-trash-can"></i>
+                            <span>清空日志</span>
+                        </button>
+                    </div>
+                    <div id="hwr_search_log_empty" class="hwr_hint">暂无实际搜索记录。</div>
+                    <div id="hwr_search_log_entries" class="hwr_search_log_entries" role="region" aria-label="搜索日志列表" aria-describedby="hwr_search_log_privacy"></div>
+                </div>
             </details>
 
 

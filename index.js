@@ -1,5 +1,6 @@
 import {
     CLIENT_VERSION,
+    chat_metadata,
     eventSource,
     event_types,
     extension_prompt_roles,
@@ -21,6 +22,7 @@ import {
     getApiUrl,
     modules,
     renderExtensionTemplateAsync,
+    saveMetadataDebounced,
 } from '../../../extensions.js';
 import { is_group_generating } from '../../../group-chats.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../textgen-settings.js';
@@ -84,6 +86,7 @@ import {
     raceTaskWithAbortSignal,
 } from './planner-request-router.js';
 import {
+    buildSafePurposeFallbackQuery,
     buildSafeFallbackQuery,
     containsSensitiveQueryMaterial,
     validateSearchQueryCandidate,
@@ -100,9 +103,26 @@ import {
 import {
     buildCompletedClientToolMessages,
     buildClientWebSearchInvocations,
+    hasCurrentUserMessageForTransport,
     normalizeResearchTransport,
     resolveResearchTransport,
 } from './research-transport.js';
+import {
+    DEFAULT_RESULT_VARIABLE_NAME,
+    isValidResultVariableName,
+    neutralizeSillyTavernMacros,
+    normalizeResultInjectionDepth,
+    normalizeResultInjectionPosition,
+    normalizeResultInjectionRole,
+    normalizeResultVariableName,
+    normalizeResultVariableScope,
+    replaceEphemeralResultMarkers,
+} from './research-injection.js';
+import {
+    appendSearchLogEntry,
+    createSearchLogEntry,
+    formatSearchLogEntries,
+} from './search-log.js';
 import { extractGeminiGroundedAnswer } from './gemini-grounding.js';
 import {
     canonicalizeUrl,
@@ -163,7 +183,7 @@ const CONNECTION_MODES = new Set(['profile', 'direct']);
 const HANDLED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe']);
 
 const defaultSettings = {
-    schemaVersion: 12,
+    schemaVersion: 13,
     enabled: false,
     adapter: 'auto',
     searchPolicy: 'auto',
@@ -208,6 +228,11 @@ const defaultSettings = {
     reuseSeconds: 600,
     includeSourceLinks: true,
     resultTransport: 'auto',
+    resultInjectionPosition: 'chat',
+    resultInjectionDepth: 0,
+    resultInjectionRole: 'user',
+    resultVariableScope: 'local',
+    resultVariableName: DEFAULT_RESULT_VARIABLE_NAME,
     debug: false,
 };
 
@@ -221,7 +246,11 @@ let activeRunEpoch = null;
 let activeAbortController = null;
 let activeToolTransport = null;
 let activePromptInjection = false;
+let activeVariableInjection = null;
 let generationStartSnapshot = null;
+let searchLogEntries = [];
+let searchLogSequence = 0;
+let searchLogGeneration = 0;
 let pausedBackendMigration = '';
 let plannerDirectCredentialRequestGuard = null;
 const plannerDirectCredentialSealedRequests = new WeakMap();
@@ -241,6 +270,7 @@ const plannerDirectCredentialSealedRequests = new WeakMap();
  * @property {string} formatted
  * @property {{provider: string, engine: string, text: string, candidateLinks: string[]}|null} [aggregateEvidence]
  * @property {boolean} [forcePromptTransport]
+ * @property {boolean} [cacheHit]
  */
 
 /**
@@ -337,6 +367,11 @@ function normalizeSettings(settings) {
     if (!RESEARCH_TRANSPORTS.has(settings.resultTransport)) {
         setValue('resultTransport', normalizeResearchTransport(settings.resultTransport));
     }
+    setValue('resultInjectionPosition', normalizeResultInjectionPosition(settings.resultInjectionPosition));
+    setValue('resultInjectionDepth', normalizeResultInjectionDepth(settings.resultInjectionDepth));
+    setValue('resultInjectionRole', normalizeResultInjectionRole(settings.resultInjectionRole));
+    setValue('resultVariableScope', normalizeResultVariableScope(settings.resultVariableScope));
+    setValue('resultVariableName', normalizeResultVariableName(settings.resultVariableName));
     setValue('enabled', Boolean(settings.enabled));
     const backendResolution = resolveResearchBackendSelection(settings.researchBackend, settings.enabled);
     if (backendResolution.paused) {
@@ -998,15 +1033,204 @@ async function sendDirectNativeRequest(provider, messages, maxTokens, overridePa
     }, false, signal);
 }
 
-function setResearchPrompt(value) {
-    activePromptInjection = Boolean(value);
+function getResultInjectionPlacement(settings = getSettings()) {
+    const roleMap = {
+        system: extension_prompt_roles.SYSTEM,
+        user: extension_prompt_roles.USER,
+        assistant: extension_prompt_roles.ASSISTANT,
+    };
+    const role = roleMap[settings.resultInjectionRole] ?? extension_prompt_roles.USER;
+    if (settings.resultInjectionPosition === 'before_prompt') {
+        return { position: extension_prompt_types.BEFORE_PROMPT, depth: 0, role };
+    }
+    if (settings.resultInjectionPosition === 'after_prompt') {
+        return { position: extension_prompt_types.IN_PROMPT, depth: 0, role };
+    }
+    return {
+        position: extension_prompt_types.IN_CHAT,
+        depth: normalizeResultInjectionDepth(settings.resultInjectionDepth),
+        role,
+    };
+}
+
+function createEphemeralResultInjectionId() {
+    if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+    return `result-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function openVariableInjectionStore(scope) {
+    if (scope === 'global') {
+        const hadVariables = Boolean(
+            extension_settings.variables
+            && typeof extension_settings.variables === 'object'
+            && !Array.isArray(extension_settings.variables),
+        );
+        if (!hadVariables) extension_settings.variables = {};
+        const parent = extension_settings.variables;
+        const hadContainer = Boolean(
+            parent.global
+            && typeof parent.global === 'object'
+            && !Array.isArray(parent.global),
+        );
+        if (!hadContainer) parent.global = {};
+        return {
+            scope,
+            parent,
+            containerKey: 'global',
+            store: parent.global,
+            hadContainer,
+            hadVariables,
+            root: extension_settings,
+            save: saveSettingsDebounced,
+        };
+    }
+
+    const metadata = chat_metadata;
+    const hadContainer = Boolean(
+        metadata.variables
+        && typeof metadata.variables === 'object'
+        && !Array.isArray(metadata.variables),
+    );
+    if (!hadContainer) metadata.variables = {};
+    return {
+        scope: 'local',
+        parent: metadata,
+        containerKey: 'variables',
+        store: metadata.variables,
+        hadContainer,
+        hadVariables: true,
+        root: metadata,
+        save: saveMetadataDebounced,
+    };
+}
+
+function restoreActiveVariableInjection() {
+    const pending = activeVariableInjection;
+    activeVariableInjection = null;
+    if (!pending) return;
+
+    // Never overwrite a value that another extension or user changed while the
+    // request was being assembled.
+    if (pending.store[pending.name] !== pending.slotMarker) return;
+    if (pending.hadOwnValue) {
+        pending.store[pending.name] = pending.previousValue;
+    } else {
+        delete pending.store[pending.name];
+    }
+
+    if (!pending.hadContainer && Object.keys(pending.store).length === 0) {
+        delete pending.parent[pending.containerKey];
+    }
+    if (
+        pending.scope === 'global'
+        && !pending.hadVariables
+        && pending.root.variables
+        && Object.keys(pending.root.variables).length === 0
+    ) {
+        delete pending.root.variables;
+    }
+
+    // Reset any unrelated pending metadata/settings save so only the restored
+    // value can be persisted. The search packet itself was never stored here.
+    pending.save();
+}
+
+function stageVariableResultInjection(packet, settings) {
+    restoreActiveVariableInjection();
+    const name = normalizeResultVariableName(settings.resultVariableName);
+    const scope = normalizeResultVariableScope(settings.resultVariableScope);
+    const state = openVariableInjectionStore(scope);
+    const id = createEphemeralResultInjectionId();
+    const slotMarker = `<<<HWR_VARIABLE_SLOT_${id}>>>`;
+    const fallbackStartMarker = `<<<HWR_VARIABLE_FALLBACK_${id}_BEGIN>>>`;
+    const fallbackEndMarker = `<<<HWR_VARIABLE_FALLBACK_${id}_END>>>`;
+    const fallbackPacket = `${fallbackStartMarker}\n${String(packet)}\n${fallbackEndMarker}`;
+    const hadOwnValue = Object.prototype.hasOwnProperty.call(state.store, name);
+
+    activeVariableInjection = {
+        ...state,
+        name,
+        packet: String(packet),
+        slotMarker,
+        fallbackStartMarker,
+        fallbackEndMarker,
+        hadOwnValue,
+        previousValue: state.store[name],
+    };
+    // Only an opaque marker enters the SillyTavern variable. The evidence is
+    // swapped into the already-built request and therefore never becomes chat
+    // metadata or a global variable value.
+    state.store[name] = slotMarker;
+
+    // Keep one full request-only packet in the late fallback so SillyTavern's
+    // token budget sees the real size. After assembly it is either moved to the
+    // variable slot or unwrapped in place, never duplicated.
     setExtensionPrompt(
         PROMPT_KEY,
-        value,
+        fallbackPacket,
         extension_prompt_types.IN_CHAT,
         0,
         false,
-        extension_prompt_roles.SYSTEM,
+        extension_prompt_roles.USER,
+    );
+}
+
+function applyActiveVariableInjection(payload, { finalChance = false } = {}) {
+    const pending = activeVariableInjection;
+    if (!pending || !payload || typeof payload !== 'object') return false;
+
+    const outcome = replaceEphemeralResultMarkers(payload, pending);
+    if (!outcome.replaced) {
+        if (!finalChance) return false;
+        restoreActiveVariableInjection();
+        setExtensionPrompt(
+            PROMPT_KEY,
+            '',
+            extension_prompt_types.IN_CHAT,
+            0,
+            false,
+            extension_prompt_roles.USER,
+        );
+        updateStatus('partial', `本轮请求中未找到变量槽或已计入预算的回退研究包，已取消注入，避免超出上下文`);
+        return false;
+    }
+
+    disableVendorNativeSearch(payload);
+    restoreActiveVariableInjection();
+    setExtensionPrompt(
+        PROMPT_KEY,
+        '',
+        extension_prompt_types.IN_CHAT,
+        0,
+        false,
+        extension_prompt_roles.USER,
+    );
+    if (outcome.usedVariableSlot) {
+        updateStatus('ready', `已在${pending.scope === 'global' ? '全局' : '局部'}变量槽 ${pending.name} 注入临时研究包`);
+    } else {
+        updateStatus('partial', `未在本轮提示词中找到变量槽 ${pending.name}，已回退到聊天末尾注入`);
+    }
+    return true;
+}
+
+function setResearchPrompt(value) {
+    restoreActiveVariableInjection();
+    const safeValue = value ? neutralizeSillyTavernMacros(value) : '';
+    activePromptInjection = Boolean(safeValue);
+    const settings = getSettings();
+    if (safeValue && settings.resultInjectionPosition === 'variable') {
+        stageVariableResultInjection(safeValue, settings);
+        return;
+    }
+
+    const placement = getResultInjectionPlacement(settings);
+    setExtensionPrompt(
+        PROMPT_KEY,
+        safeValue,
+        placement.position,
+        placement.depth,
+        false,
+        placement.role,
     );
 }
 
@@ -1103,20 +1327,31 @@ function getRequestMessageText(message) {
     }).join('\n');
 }
 
-function removeTransportMarkerBlock(message, startMarker, endMarker) {
-    const removeFromText = text => {
-        const start = text.indexOf(startMarker);
-        if (start < 0) return { text, removed: false };
-        const end = text.indexOf(endMarker, start + startMarker.length);
-        if (end < 0) return { text, removed: false };
-        const nextText = `${text.slice(0, start)}${text.slice(end + endMarker.length)}`
-            .replace(/\n{3,}/gu, '\n\n')
-            .trim();
-        return { text: nextText, removed: true };
-    };
+function hasRequestMessageNonTextContent(message) {
+    if (!Array.isArray(message?.content)) return false;
+    return message.content.some(part => {
+        if (typeof part === 'string') return false;
+        if (!part || typeof part !== 'object') return Boolean(part);
+        const type = String(part.type || '').trim().toLowerCase();
+        if (type && type !== 'text') return true;
+        return typeof part.text !== 'string' && typeof part.content !== 'string';
+    });
+}
 
+function removeTransportMarkerBlockText(text, startMarker, endMarker) {
+    const start = text.indexOf(startMarker);
+    if (start < 0) return { text, removed: false };
+    const end = text.indexOf(endMarker, start + startMarker.length);
+    if (end < 0) return { text, removed: false };
+    const nextText = `${text.slice(0, start)}${text.slice(end + endMarker.length)}`
+        .replace(/\n{3,}/gu, '\n\n')
+        .trim();
+    return { text: nextText, removed: true };
+}
+
+function removeTransportMarkerBlock(message, startMarker, endMarker) {
     if (typeof message?.content === 'string') {
-        const result = removeFromText(message.content);
+        const result = removeTransportMarkerBlockText(message.content, startMarker, endMarker);
         if (result.removed) message.content = result.text;
         return result.removed;
     }
@@ -1130,7 +1365,7 @@ function removeTransportMarkerBlock(message, startMarker, endMarker) {
                 ? 'content'
                 : '';
         if (!key) continue;
-        const result = removeFromText(part[key]);
+        const result = removeTransportMarkerBlockText(part[key], startMarker, endMarker);
         if (!result.removed) continue;
         part[key] = result.text;
         message.content = message.content.filter(item => {
@@ -1219,6 +1454,7 @@ function enforcePlannerDirectCredentialWindowRequest(request) {
 
 function handleChatCompletionSettingsReady(request) {
     if (!request || typeof request !== 'object') return;
+    applyActiveVariableInjection(request, { finalChance: true });
     if (activePromptInjection && hasInjectedResearchMarker(request)) {
         disableVendorNativeSearch(request);
     }
@@ -1235,14 +1471,13 @@ function handleChatCompletionSettingsReady(request) {
     if (markerMessageIndex < 0) return;
 
     disableVendorNativeSearch(request);
-    const normalizedUserText = normalizeWhitespace(pending.userText);
-    const latestRequestUser = request.messages.findLast(message =>
-        message?.role === 'user'
-        && message?.name !== 'example_user'
-        && !message?.is_example);
-    const realUserFound = normalizeWhitespace(getRequestMessageText(latestRequestUser))
-        .includes(normalizedUserText);
-    if (!normalizedUserText || !realUserFound) {
+    const realUserFound = hasCurrentUserMessageForTransport(request.messages, {
+        markerMessageIndex,
+        startMarker: pending.startMarker,
+        endMarker: pending.endMarker,
+        userText: pending.userText,
+    });
+    if (!realUserFound) {
         activeToolTransport = null;
         updateStatus('partial', '无法定位本轮真实用户消息，已保留隐藏研究包');
         return;
@@ -1256,7 +1491,7 @@ function handleChatCompletionSettingsReady(request) {
     }
     if (!getRequestMessageText(markerMessage).trim()
         && !markerMessage.tool_calls
-        && markerMessage.role === 'system') {
+        && !hasRequestMessageNonTextContent(markerMessage)) {
         request.messages.splice(markerMessageIndex, 1);
     }
 
@@ -1277,6 +1512,10 @@ function handleChatCompletionSettingsReady(request) {
     activeToolTransport = null;
     setResearchPrompt('');
     updateStatus('ready', `已通过隐藏工具结果注入（${toolCalls.length} 次客户端搜索，非厂商原生）`);
+}
+
+function handleGenerateAfterData(payload) {
+    applyActiveVariableInjection(payload, { finalChance: true });
 }
 
 function clearPrompt() {
@@ -1428,11 +1667,20 @@ function updateSettingsSectionSummaries({ openMissing = false, openSource = fals
         .split('：')[0]
         .trim();
     const aggregateBackend = ['extras', 'selenium'].includes(settings.researchBackend);
-    const transportText = settings.resultTransport === 'prompt' || aggregateBackend
-        ? '隐藏研究包'
-        : isClientToolTransportSupported() ? '工具结果优先' : '自动研究包';
+    const transportText = settings.resultInjectionPosition === 'variable'
+        ? '变量槽研究包'
+        : settings.resultTransport === 'prompt' || aggregateBackend
+            ? '隐藏研究包'
+            : isClientToolTransportSupported() ? '工具结果优先' : '自动研究包';
+    const injectionText = settings.resultInjectionPosition === 'variable'
+        ? `${settings.resultVariableScope === 'global' ? '全局' : '局部'}变量槽`
+        : settings.resultInjectionPosition === 'before_prompt'
+            ? '主提示词开头'
+            : settings.resultInjectionPosition === 'after_prompt'
+                ? '主提示词末尾'
+                : `${settings.resultInjectionRole} · 深度 ${settings.resultInjectionDepth}`;
     $('#hwr_behavior_summary').text(
-        (policyLabels[settings.searchPolicy] || '自动判断') + ' · ' + strategyText + ' · ' + transportText,
+        (policyLabels[settings.searchPolicy] || '自动判断') + ' · ' + strategyText + ' · ' + transportText + ' · ' + injectionText,
     );
 
     let plannerText = '当前回答模型';
@@ -1532,6 +1780,231 @@ function pruneCache(cache, maxEntries = 30) {
     oldestKeys.forEach(key => cache.delete(key));
 }
 
+function getSafeSearchLogUrl(value) {
+    try {
+        const parsed = new URL(String(value || ''));
+        if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+        if (parsed.username || parsed.password) return '';
+        return parsed.toString();
+    } catch {
+        return '';
+    }
+}
+
+function getSearchLogStatusLabel(status) {
+    if (status === 'error') return '失败';
+    if (status === 'cache') return '缓存复用';
+    return '成功';
+}
+
+function formatSearchLogLocalTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value || '未知时间');
+    try {
+        return date.toLocaleString([], { hour12: false });
+    } catch {
+        return date.toISOString();
+    }
+}
+
+function renderSearchLog() {
+    try {
+        const container = $('#hwr_search_log_entries');
+        if (!container.length) return;
+        container.empty();
+        const count = searchLogEntries.length;
+        $('#hwr_search_log_summary').text(count ? `${count} 条记录` : '暂无记录');
+        $('#hwr_search_log_empty').toggle(count === 0);
+        $('#hwr_copy_search_log, #hwr_clear_search_log').prop('disabled', count === 0);
+
+        for (const entry of [...searchLogEntries].reverse()) {
+            const details = $('<details>').addClass('hwr_search_log_entry');
+            const summary = $('<summary>').addClass('hwr_search_log_entry_summary');
+            summary.append(
+                $('<span>')
+                    .addClass('hwr_search_log_badge')
+                    .attr('data-state', entry.status)
+                    .text(getSearchLogStatusLabel(entry.status)),
+                $('<span>').addClass('hwr_search_log_query').text(entry.query || '（无关键词）'),
+                $('<span>').addClass('hwr_search_log_time').text(
+                    `${entry.backendLabel || entry.backend || '未知来源'} · ${formatSearchLogLocalTime(entry.finishedAtUtc)}`,
+                ),
+            );
+            const body = $('<div>').addClass('hwr_search_log_entry_body');
+            const contextText = entry.context === 'test' ? '连接测试' : '聊天研究';
+            const resultText = entry.aggregateEvidence
+                ? `${entry.resultCount} 条逐项结果 + 1 份聚合摘要`
+                : `${entry.resultCount} 条结果`;
+            body.append(
+                $('<div>').addClass('hwr_search_log_meta').text(
+                    `${entry.backendLabel || entry.backend || '未知来源'} · ${contextText} · ${entry.durationMs} ms · ${resultText}`,
+                ),
+                $('<div>').addClass('hwr_search_log_query_block')
+                    .append($('<strong>').text('脱敏后的实际查询'), $('<code>').text(entry.query || '（无）')),
+            );
+            if (entry.cacheHit) {
+                body.append($('<div>').addClass('hwr_notice').text('本条来自页面内存缓存，没有再次请求搜索服务。'));
+            }
+            if (entry.note) body.append($('<div>').addClass('hwr_hint').text(entry.note));
+            if (entry.error) {
+                body.append(
+                    $('<div>').addClass('hwr_search_log_error')
+                        .append($('<strong>').text('错误'), $('<pre>').text(entry.error)),
+                );
+            }
+
+            if (entry.items?.length) {
+                const list = $('<ol>').addClass('hwr_search_log_results');
+                for (const item of entry.items) {
+                    const row = $('<li>');
+                    const safeUrl = getSafeSearchLogUrl(item.url);
+                    const title = item.title || safeUrl || '无标题结果';
+                    if (safeUrl) {
+                        row.append(
+                            $('<a>')
+                                .attr({
+                                    href: safeUrl,
+                                    target: '_blank',
+                                    rel: 'noopener noreferrer nofollow',
+                                })
+                                .text(title),
+                        );
+                    } else {
+                        row.append($('<strong>').text(title));
+                    }
+                    if (item.published) row.append($('<div>').addClass('hwr_search_log_date').text(item.published));
+                    if (item.snippet) row.append($('<div>').addClass('hwr_search_log_snippet').text(item.snippet));
+                    if (safeUrl) row.append($('<div>').addClass('hwr_search_log_url').text(safeUrl));
+                    list.append(row);
+                }
+                body.append($('<strong>').text(`规范化结果（${entry.items.length}）`), list);
+            }
+
+            const aggregate = entry.aggregateEvidence;
+            if (aggregate) {
+                const aggregateBlock = $('<div>').addClass('hwr_search_log_aggregate');
+                aggregateBlock.append(
+                    $('<strong>').text('未逐条归因的聚合摘要'),
+                    $('<div>').addClass('hwr_hint').text(
+                        [aggregate.provider, aggregate.engine].filter(Boolean).join(' · ') || '聚合搜索来源',
+                    ),
+                );
+                if (aggregate.text) aggregateBlock.append($('<pre>').text(aggregate.text));
+                if (aggregate.candidateLinks?.length) {
+                    const links = $('<ul>').addClass('hwr_search_log_candidate_links');
+                    for (const value of aggregate.candidateLinks) {
+                        const safeUrl = getSafeSearchLogUrl(value);
+                        if (!safeUrl) continue;
+                        links.append(
+                            $('<li>').append(
+                                $('<a>')
+                                    .attr({ href: safeUrl, target: '_blank', rel: 'noopener noreferrer nofollow' })
+                                    .text(safeUrl),
+                            ),
+                        );
+                    }
+                    if (links.children().length) aggregateBlock.append(links);
+                }
+                body.append(aggregateBlock);
+            }
+            if (!entry.error && !entry.items?.length && !entry.aggregateEvidence) {
+                body.append($('<div>').addClass('hwr_hint').text('该请求没有可显示的规范化结果。'));
+            }
+            details.append(summary, body);
+            container.append(details);
+        }
+    } catch (error) {
+        debugLog('Unable to render in-memory search log', error?.message || String(error));
+    }
+}
+
+function clearSearchLog() {
+    searchLogGeneration++;
+    searchLogEntries = [];
+    renderSearchLog();
+}
+
+function recordSearchLog(input, expectedGeneration = searchLogGeneration) {
+    try {
+        if (expectedGeneration !== searchLogGeneration) return;
+        const entry = createSearchLogEntry({
+            ...input,
+            id: `search-${++searchLogSequence}`,
+        });
+        searchLogEntries = appendSearchLogEntry(searchLogEntries, entry);
+        renderSearchLog();
+    } catch (error) {
+        debugLog('Unable to record in-memory search log', error?.message || String(error));
+    }
+}
+
+function recordResearchCacheReuse(research, backend, expectedGeneration = searchLogGeneration) {
+    try {
+        const queries = Array.isArray(research?.queries) && research.queries.length
+            ? research.queries
+            : ['（整轮隐藏研究缓存）'];
+        const sources = Array.isArray(research?.sources) ? research.sources : [];
+        const aggregateEvidence = Array.isArray(research?.aggregateEvidence)
+            ? research.aggregateEvidence
+            : [];
+        const timestamp = Date.now();
+        for (const query of queries) {
+            const matchedItems = sources.filter(source => (
+                !Array.isArray(source?.queries)
+                || !source.queries.length
+                || source.queries.includes(query)
+            ));
+            const aggregate = aggregateEvidence.find(record => record?.query === query) || null;
+            recordSearchLog({
+                backend,
+                backendLabel: getSearchBackendLabel(backend),
+                query,
+                result: { items: matchedItems, aggregateEvidence: aggregate, cacheHit: true },
+                cacheHit: true,
+                startedAt: timestamp,
+                finishedAt: timestamp,
+                note: '整轮隐藏研究缓存复用，未再次请求搜索服务。',
+            }, expectedGeneration);
+        }
+    } catch (error) {
+        debugLog('Unable to record research-cache reuse in search log', error?.message || String(error));
+    }
+}
+
+async function copySearchLogToClipboard() {
+    if (!searchLogEntries.length) return;
+    const text = formatSearchLogEntries(searchLogEntries);
+    try {
+        let copied = false;
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            } catch (error) {
+                debugLog('Clipboard API rejected search log copy; trying compatibility fallback', error?.message || String(error));
+            }
+        }
+        if (!copied) {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.append(textarea);
+            try {
+                textarea.select();
+                if (!document.execCommand('copy')) throw new Error('copy command was rejected');
+            } finally {
+                textarea.remove();
+            }
+        }
+        toastr.success('已复制当前页签内的搜索日志', DISPLAY_NAME);
+    } catch (error) {
+        debugLog('Unable to copy search log', error?.message || String(error));
+        toastr.error('复制失败，请检查浏览器剪贴板权限', DISPLAY_NAME);
+    }
+}
+
 function getLatestUserMessage(chat) {
     if (!Array.isArray(chat)) return null;
     return chat.slice().reverse().find(message =>
@@ -1602,12 +2075,45 @@ function isClientToolTransportSupported() {
     }
 }
 
+function updateResultInjectionUi() {
+    const settings = getSettings();
+    const position = settings.resultInjectionPosition;
+    const variableMode = position === 'variable';
+    $('#hwr_chat_injection_options').toggle(!variableMode);
+    $('#hwr_injection_depth_options').toggle(position === 'chat');
+    $('#hwr_variable_injection_options').toggle(variableMode);
+    $('#hwr_result_transport').prop('disabled', variableMode);
+
+    const macro = settings.resultVariableScope === 'global'
+        ? `{{getglobalvar::${settings.resultVariableName}}}`
+        : `{{getvar::${settings.resultVariableName}}}`;
+    $('#hwr_result_variable_macro_example').text(macro);
+
+    let text;
+    if (variableMode) {
+        text = `精确位置由预设中的 ${macro} 决定；未找到时回退到末尾 User 消息。变量槽会固定使用隐藏研究包。`;
+    } else if (position === 'before_prompt') {
+        text = '当前位置：主提示词开头。动态资料会让后续前缀缓存失效，仅在明确需要时使用。';
+    } else if (position === 'after_prompt') {
+        text = '当前位置：主提示词末尾。它仍属于主提示词区域，某些转换器会与开头 system 内容合并。';
+    } else {
+        const roleLabel = settings.resultInjectionRole[0].toUpperCase() + settings.resultInjectionRole.slice(1);
+        text = `当前位置：聊天记录内 ${roleLabel}，深度 ${settings.resultInjectionDepth}。User + 深度 0 最利于保留稳定前缀缓存。`;
+    }
+    $('#hwr_resolved_injection').text(text);
+}
+
 function updateResolvedTransportLabel() {
     const settings = getSettings();
     const supported = isClientToolTransportSupported();
     const aggregateBackend = ['extras', 'selenium'].includes(settings.researchBackend);
-    const transport = aggregateBackend ? 'prompt' : resolveResearchTransport(settings.resultTransport, supported);
-    const text = aggregateBackend
+    const variableSlot = settings.resultInjectionPosition === 'variable';
+    const transport = aggregateBackend || variableSlot
+        ? 'prompt'
+        : resolveResearchTransport(settings.resultTransport, supported);
+    const text = variableSlot
+        ? `当前注入：隐藏研究包写入临时${settings.resultVariableScope === 'global' ? '全局' : '局部'}变量槽 ${settings.resultVariableName}；变量只短暂保存随机标记，真实资料在请求构造后替换`
+        : aggregateBackend
         ? '当前注入：该旧式来源只提供未逐条归因的聚合摘要，固定使用隐藏研究包'
         : transport === 'tool'
             ? '当前注入：隐藏客户端工具结果（最终请求会禁用厂商原生搜索与后续工具调用）'
@@ -1615,6 +2121,7 @@ function updateResolvedTransportLabel() {
             ? '当前注入：固定使用隐藏研究包'
             : '当前注入：工具消息转换不安全或函数调用不可用，自动使用隐藏研究包';
     $('#hwr_resolved_transport').text(text);
+    updateResultInjectionUi();
     updateSettingsSectionSummaries();
 }
 
@@ -2248,7 +2755,7 @@ async function searchSearxng(query, settings) {
     const cacheKey = `${baseUrl}\n${preferences}\n${query.toLowerCase()}\n${settings.maxResultsPerQuery}\n${settings.maxCharsPerQuery}\n${settings.includeSourceLinks}`;
     const cached = queryCache.get(cacheKey);
     if (cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()) {
-        return cached.result;
+        return { ...cached.result, cacheHit: true };
     }
 
     const response = await runAbortableRequest(signal => fetch('/api/search/searxng', {
@@ -2276,6 +2783,7 @@ async function searchSearxng(query, settings) {
         query,
         items,
         formatted: formatSearchItems(query, items, settings),
+        cacheHit: false,
     };
     if (settings.reuseSeconds > 0) {
         queryCache.set(cacheKey, { timestamp: Date.now(), result });
@@ -2307,7 +2815,7 @@ async function readSearchJson(response, label) {
 function getCachedSearchResult(cacheKey, settings) {
     const cached = queryCache.get(cacheKey);
     return cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()
-        ? cached.result
+        ? { ...cached.result, cacheHit: true }
         : null;
 }
 
@@ -2320,7 +2828,7 @@ function cacheSearchResult(cacheKey, result, settings) {
 function buildUrlBackedSearchResult(query, rawItems, settings, cacheKey, emptyMessage) {
     const items = limitSearchItemsToCharacterBudget(query, rawItems, settings);
     if (!items.length) throw new Error(emptyMessage);
-    const result = { query, items, formatted: formatSearchItems(query, items, settings) };
+    const result = { query, items, formatted: formatSearchItems(query, items, settings), cacheHit: false };
     cacheSearchResult(cacheKey, result, settings);
     return result;
 }
@@ -2333,7 +2841,7 @@ async function searchAnySearch(query, settings) {
     const cacheKey = `anysearch\n${config.zone}\n${config.language}\n${config.secretId || 'anonymous'}\n${query.toLowerCase()}\n${settings.maxResultsPerQuery}\n${settings.maxCharsPerQuery}\n${settings.includeSourceLinks}`;
     const cached = queryCache.get(cacheKey);
     if (cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()) {
-        return cached.result;
+        return { ...cached.result, cacheHit: true };
     }
 
     const response = await runAbortableRequest(signal => fetch('/api/search/anysearch', {
@@ -2369,6 +2877,7 @@ async function searchAnySearch(query, settings) {
         query,
         items,
         formatted: formatSearchItems(query, items, settings),
+        cacheHit: false,
     };
     if (settings.reuseSeconds > 0) {
         queryCache.set(cacheKey, { timestamp: Date.now(), result });
@@ -2514,6 +3023,7 @@ function buildLegacyAggregateResult(query, normalized, settings, cacheKey, provi
             candidateLinks: settings.includeSourceLinks ? normalized.candidateLinks : [],
         },
         forcePromptTransport: true,
+        cacheHit: false,
     };
     cacheSearchResult(cacheKey, result, settings);
     return result;
@@ -2647,6 +3157,40 @@ async function searchStructuredBackend(query, settings) {
     throw new Error('Unsupported research backend: ' + settings.researchBackend);
 }
 
+async function searchStructuredBackendWithLog(
+    query,
+    settings,
+    context = 'research',
+    expectedGeneration = searchLogGeneration,
+) {
+    const startedAt = Date.now();
+    try {
+        const result = await searchStructuredBackend(query, settings);
+        recordSearchLog({
+            backend: settings.researchBackend,
+            backendLabel: getSearchBackendLabel(settings.researchBackend),
+            query,
+            result,
+            cacheHit: Boolean(result?.cacheHit),
+            context,
+            startedAt,
+            finishedAt: Date.now(),
+        }, expectedGeneration);
+        return result;
+    } catch (error) {
+        recordSearchLog({
+            backend: settings.researchBackend,
+            backendLabel: getSearchBackendLabel(settings.researchBackend),
+            query,
+            error,
+            context,
+            startedAt,
+            finishedAt: Date.now(),
+        }, expectedGeneration);
+        throw error;
+    }
+}
+
 function buildResearchPacket({
     adapter,
     userText,
@@ -2720,6 +3264,7 @@ function makeResearchCacheKey(chatId, adapter, userText, backend, plannerContext
 }
 
 async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runtimeClock, temporalKind = 'none' }) {
+    const logGeneration = searchLogGeneration;
     const latestUser = getLatestUserMessage(chat);
     if (!latestUser) return null;
 
@@ -2771,7 +3316,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     const cached = researchCache.get(cacheKey);
     if (settings.reuseSeconds > 0 && cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()) {
         updateStatus('ready', `已复用隐藏研究（${cached.queries.length} 次搜索）`);
-        return cached.research || {
+        const cachedResearch = cached.research || {
             packet: cached.packet,
             adapter,
             userText,
@@ -2784,6 +3329,8 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             researchPartial: false,
             retrievedAtUtc: runtimeClock.capturedAtUtc,
         };
+        recordResearchCacheReuse(cachedResearch, settings.researchBackend, logGeneration);
+        return cachedResearch;
     }
 
     await ensureStructuredSearchBackendReady(settings);
@@ -2822,6 +3369,13 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             debugLog('Blocked a planner query that could expose uncompressed user text', { reason });
         }
         blockedLowQualityQueries = true;
+    };
+    const requestSaferQueryReplan = () => {
+        unresolvedGaps = [...new Set([
+            ...unresolvedGaps,
+            'The previous proposed query was rejected because it copied or wrapped the user input. Re-plan it as a standalone search query containing only 3-12 retrieval terms, proper names, and the specific fact to verify. Do not include chat narration, labels, or roleplay prose.',
+        ])].slice(0, 8);
+        updateStatus('planning', '规划查询包含用户正文，正在重新提炼');
     };
     const getFallbackQuery = () => {
         const query = cleanQuery(buildSafeFallbackQuery(userText, 120));
@@ -2911,6 +3465,14 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 break;
             } else if (mustSearch) {
                 decision = makeFallbackDecision();
+                if (
+                    decision.action === 'INVALID'
+                    && !blockedUnsafeQueries
+                    && round < settings.maxRounds
+                ) {
+                    requestSaferQueryReplan();
+                    continue;
+                }
             } else if (invalidPlannerResponses >= 1) {
                 break;
             }
@@ -2919,7 +3481,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
 
         const blockedThisDecision = decision.queries.some(query => containsSensitiveQueryMaterial(query));
         let lowQualityThisDecision = false;
-        const cleanedQueries = decision.queries.map(query => {
+        const cleanedQueries = decision.queries.map((query, queryIndex) => {
             if (containsSensitiveQueryMaterial(query)) {
                 markUnsafeQueryBlocked();
                 return '';
@@ -2929,8 +3491,18 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 maxLength: 120,
             });
             if (!validation.valid) {
-                lowQualityThisDecision = true;
                 markLowQualityQueryBlocked(validation.reason);
+                const recoveredQuery = buildSafePurposeFallbackQuery(
+                    decision.queryPurposes[queryIndex],
+                    { userRequest: userText, maxLength: 120 },
+                );
+                if (recoveredQuery) {
+                    debugLog('Recovered a blocked planner query from its concise evidence purpose', {
+                        reason: validation.reason,
+                    });
+                    return cleanQuery(recoveredQuery);
+                }
+                lowQualityThisDecision = true;
                 return '';
             }
             return cleanQuery(validation.query);
@@ -2948,11 +3520,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 newQueries.push(...fallbackQueries);
             } else {
                 if (!evidence.length && lowQualityThisDecision && round < settings.maxRounds) {
-                    unresolvedGaps = [...new Set([
-                        ...unresolvedGaps,
-                        'The previous proposed query was rejected because it copied or wrapped the user input. Re-plan it as a standalone search query containing only 3-12 retrieval terms, proper names, and the specific fact to verify. Do not include chat narration, labels, or roleplay prose.',
-                    ])].slice(0, 8);
-                    updateStatus('planning', '规划查询包含用户正文，正在重新提炼');
+                    requestSaferQueryReplan();
                     continue;
                 }
                 if (evidence.length) {
@@ -3012,7 +3580,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             seenQueries.push(query);
             updateStatus('searching', `正在隐藏搜索（${seenQueries.length}/${totalQueryLimit}）`);
             try {
-                const result = await searchStructuredBackend(query, settings);
+                const result = await searchStructuredBackendWithLog(query, settings, 'research', logGeneration);
                 sourceState = mergeStructuredSourceBatch(
                     sourceState,
                     result.items.map(item => ({ ...item, query })),
@@ -3046,6 +3614,15 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             }
             if (evidenceAtCapacity) break;
         }
+        if (
+            !evidence.length
+            && blockedPreparedQueryCount
+            && !blockedPreparedUnsafeQueryCount
+            && round < settings.maxRounds
+        ) {
+            requestSaferQueryReplan();
+            continue;
+        }
         if (successfulSearch && evidence.length) needsFinalAssessment = true;
         if (evidence.length && (
             blockedThisDecision
@@ -3077,7 +3654,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         } else if (blockedUnsafeQueries) {
             idleMessage = '已阻止可能包含凭据的搜索查询，已继续普通生成';
         } else if (blockedLowQualityQueries) {
-            idleMessage = '规划查询过长或复制了用户正文，已阻止发送并继续普通生成';
+            idleMessage = '规划器连续未能生成安全短查询，已跳过搜索并继续普通生成';
         } else if (invalidPlannerResponses) {
             idleMessage = '规划结果无效，已继续普通生成';
         }
@@ -3774,7 +4351,9 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
         }
 
         const toolCallingSupported = isClientToolTransportSupported();
-        const transport = researchResult.forcePromptTransport
+        const transport = settings.resultInjectionPosition === 'variable'
+            ? 'prompt'
+            : researchResult.forcePromptTransport
             ? 'prompt'
             : resolveResearchTransport(settings.resultTransport, toolCallingSupported);
         const invocations = transport === 'tool'
@@ -3809,7 +4388,9 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
             researchResult.packet,
         ].filter(Boolean).join('\n\n');
         setResearchPrompt(fallbackPrompt);
-        const fallbackReason = researchResult.forcePromptTransport
+        const fallbackReason = settings.resultInjectionPosition === 'variable'
+            ? '已按设置使用指定酒馆变量槽；变量中只放临时标记，研究资料将在请求构造后替换'
+            : researchResult.forcePromptTransport
             ? '聚合搜索摘要无法安全转换为逐 URL 工具结果，已使用隐藏研究包'
             : settings.resultTransport === 'prompt'
                 ? '已按设置使用隐藏研究包'
@@ -5459,6 +6040,7 @@ async function testPlannerProfile() {
 }
 
 async function testStructuredSearchConnection(backend) {
+    const logGeneration = searchLogGeneration;
     if (activeRunEpoch !== null) {
         toastr.warning('隐藏研究正在运行，请等待本轮结束后再测试搜索服务');
         return;
@@ -5469,11 +6051,11 @@ async function testStructuredSearchConnection(backend) {
     const label = getSearchBackendLabel(backend);
     updateStatus('searching', `正在测试 ${label}…`);
     try {
-        const result = await searchStructuredBackend('SillyTavern', {
+        const result = await searchStructuredBackendWithLog('SillyTavern', {
             ...settings,
             researchBackend: backend,
             reuseSeconds: 0,
-        });
+        }, 'test', logGeneration);
         const aggregateCount = result.aggregateEvidence?.text ? 1 : 0;
         const resultSummary = result.items.length
             ? `取得 ${result.items.length} 条带 URL 的结果`
@@ -5623,6 +6205,45 @@ function bindSettingsUi() {
         settings.resultTransport = normalizeResearchTransport($(this).val());
         $(this).val(settings.resultTransport);
         invalidateRun('Result transport changed');
+        updateResolvedTransportLabel();
+        saveSettingsDebounced();
+    });
+    $('#hwr_result_injection_position').val(settings.resultInjectionPosition).on('change', function () {
+        settings.resultInjectionPosition = normalizeResultInjectionPosition($(this).val());
+        $(this).val(settings.resultInjectionPosition);
+        invalidateRun('Result injection position changed');
+        updateResolvedTransportLabel();
+        saveSettingsDebounced();
+    });
+    $('#hwr_result_injection_role').val(settings.resultInjectionRole).on('change', function () {
+        settings.resultInjectionRole = normalizeResultInjectionRole($(this).val());
+        $(this).val(settings.resultInjectionRole);
+        invalidateRun('Result injection role changed');
+        updateResolvedTransportLabel();
+        saveSettingsDebounced();
+    });
+    $('#hwr_result_injection_depth').val(settings.resultInjectionDepth).on('change', function () {
+        settings.resultInjectionDepth = normalizeResultInjectionDepth($(this).val());
+        $(this).val(settings.resultInjectionDepth);
+        invalidateRun('Result injection depth changed');
+        updateResolvedTransportLabel();
+        saveSettingsDebounced();
+    });
+    $('#hwr_result_variable_scope').val(settings.resultVariableScope).on('change', function () {
+        settings.resultVariableScope = normalizeResultVariableScope($(this).val());
+        $(this).val(settings.resultVariableScope);
+        invalidateRun('Result variable scope changed');
+        updateResolvedTransportLabel();
+        saveSettingsDebounced();
+    });
+    $('#hwr_result_variable_name').val(settings.resultVariableName).on('change', function () {
+        const proposed = String($(this).val() || '').normalize('NFKC').trim();
+        if (!isValidResultVariableName(proposed)) {
+            toastr.warning('变量名不能为空、不能超过 64 字符，不能包含空格、冒号、花括号或使用保留名称。已恢复默认名称。', DISPLAY_NAME);
+        }
+        settings.resultVariableName = normalizeResultVariableName(proposed);
+        $(this).val(settings.resultVariableName);
+        invalidateRun('Result variable name changed');
         updateResolvedTransportLabel();
         saveSettingsDebounced();
     });
@@ -5801,6 +6422,11 @@ function bindSettingsUi() {
         updateStatus('idle', '内存缓存与临时注入已清理');
         toastr.success('已清理', DISPLAY_NAME);
     });
+    $('#hwr_copy_search_log').on('click', copySearchLogToClipboard);
+    $('#hwr_clear_search_log').on('click', () => {
+        clearSearchLog();
+        toastr.success('搜索日志已清空', DISPLAY_NAME);
+    });
 
     if (ENABLE_SERVER_DEPENDENT_FEATURES) {
         refreshClaudeProfiles();
@@ -5818,6 +6444,7 @@ function bindSettingsUi() {
     updateSettingsSectionSummaries({ openMissing: true });
     updateResolvedTransportLabel();
     switchBackendUi();
+    renderSearchLog();
     if (pausedBackendMigration) {
         const previousBackend = pausedBackendMigration;
         pausedBackendMigration = '';
@@ -5856,6 +6483,7 @@ if (CLIENT_COMPATIBILITY.supported) {
         event_types.CHAT_COMPLETION_SETTINGS_READY,
         capturePlannerDirectCredentialWindowRequest,
     );
+    eventSource.on(event_types.GENERATE_AFTER_DATA, handleGenerateAfterData);
     eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, handleChatCompletionSettingsReady);
     eventSource.makeLast(
         event_types.CHAT_COMPLETION_SETTINGS_READY,
@@ -5873,7 +6501,8 @@ if (CLIENT_COMPATIBILITY.supported) {
     eventSource.on(event_types.CHAT_CHANGED, () => {
         generationStartSnapshot = null;
         invalidateRun('Chat changed', { clearCaches: true });
-        updateStatus('idle', '聊天已切换，临时研究已清理');
+        clearSearchLog();
+        updateStatus('idle', '聊天已切换，临时研究与搜索日志已清理');
     });
 }
 if (ENABLE_SERVER_DEPENDENT_FEATURES) {
