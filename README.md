@@ -67,6 +67,12 @@ Z.AI 不在支持列表中，也没有凭据入口或可调用路径。Extras/Se
 
 当前路径不会继续打开并阅读完整网页，因此它属于摘要级研究，不是 Claude/Gemini 原生页面阅读能力的复制。SearXNG Base URL 应使用可信地址；在多人或公网酒馆上允许普通用户任意修改该地址可能形成服务端请求风险。
 
+#### Windows Docker 一键安装或修复
+
+先安装并启动 Docker Desktop，再下载并双击 [P1G-SearXNG-OneClick.bat](./P1G-SearXNG-OneClick.bat)。脚本既能首次安装，也能自动识别并修复旧版一键脚本创建的 `searxng` 容器：它会先按时间戳备份现有 `settings.yml`，再只保留 Google、Bing、DuckDuckGo 与百度，防止仅设置 `disabled: true` 后 Wikidata、Startpage、Torch、Ahmia 仍在容器启动阶段加载。脚本重启容器后会执行一次真实搜索并核对引擎列表。
+
+默认地址是 `http://localhost:8888`；P1G搜中的 SearXNG Preferences string 保持空白即可。修复后不要再次运行旧的 `one-click-install-1.bat`，否则旧脚本会重新写入 `use_default_settings: true` 并恢复全部默认引擎。
+
 ### SerpAPI Google Search
 
 扩展复用原版 SillyTavern 自带的 `SECRET_KEYS.SERPAPI` 和 `POST /api/search/serpapi`：
