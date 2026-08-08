@@ -4,6 +4,7 @@ import {
     buildSafeFallbackQuery,
     compactSearchRequest,
     containsSensitiveQueryMaterial,
+    validateSearchQueryCandidate,
 } from '../query-safety.js';
 
 const longRequest = `${'A'.repeat(5000)} Please search the web for the latest stable SDK version.`;
@@ -14,10 +15,55 @@ assert.match(compacted, /\[middle omitted\]/u);
 assert.match(compacted, /Please search the web for the latest stable SDK version\.$/u);
 
 assert.equal(compactSearchRequest('  short\nrequest  ', 4000), 'short request');
-assert.match(
-    buildSafeFallbackQuery(longRequest, 220),
-    /Please search the web for the latest stable SDK version\.$/u,
+assert.equal(buildSafeFallbackQuery(longRequest, 220), 'the latest stable SDK version');
+
+assert.equal(
+    validateSearchQueryCandidate('以下是用户的本轮输入：东京明天天气', {
+        userRequest: '东京明天天气',
+    }).reason,
+    'wrapped_user_request',
 );
+assert.deepEqual(
+    validateSearchQueryCandidate('搜索查询：东京明天天气', { userRequest: '东京明天天气' }),
+    { valid: true, query: '东京明天天气', reason: 'wrapper_removed' },
+);
+
+const wrappedRoleplay = '以下是用户的本轮输入：在房间里陪已经睡着的艾莉丝，先观察她是否醒来，然后继续描述房间里的灯光、衣服、动作、表情以及接下来发生的全部对话和剧情。';
+assert.equal(
+    validateSearchQueryCandidate(wrappedRoleplay, { userRequest: wrappedRoleplay }).reason,
+    'wrapped_user_request',
+);
+assert.equal(buildSafeFallbackQuery(wrappedRoleplay, 220), '');
+
+const wrappedCompactNarrative = '以下是用户的本轮输入：抱着艾莉丝去床上睡觉去，然后第二天醒来继续描写房间里的对话和动作，并保持角色设定与剧情连续性';
+assert.equal(
+    validateSearchQueryCandidate(wrappedCompactNarrative, { userRequest: wrappedCompactNarrative }).reason,
+    'wrapped_user_request',
+);
+assert.equal(buildSafeFallbackQuery(wrappedCompactNarrative, 220), '');
+
+const copiedNarrative = '在房间里陪已经睡着的艾莉丝，先观察她是否醒来，然后继续描述房间里的灯光、衣服、动作、表情以及接下来发生的全部对话和剧情，并保持此前约定的叙述方式。';
+assert.ok(
+    ['narrative_text', 'copied_user_request'].includes(
+        validateSearchQueryCandidate(copiedNarrative, { userRequest: copiedNarrative }).reason,
+    ),
+);
+assert.equal(buildSafeFallbackQuery(copiedNarrative, 220), '');
+const copiedLongSentence = 'Alice official character profile appearance outfit personality sleeping habit relationship story';
+assert.equal(
+    validateSearchQueryCandidate(copiedLongSentence, { userRequest: copiedLongSentence }).reason,
+    'copied_user_request',
+);
+assert.deepEqual(
+    validateSearchQueryCandidate('艾莉丝 官方角色设定 睡眠习惯', { userRequest: copiedNarrative }),
+    { valid: true, query: '艾莉丝 官方角色设定 睡眠习惯', reason: 'ok' },
+);
+
+assert.equal(
+    buildSafeFallbackQuery(`${'剧情描述 '.repeat(80)}请搜索：艾莉丝 官方角色设定`, 220),
+    '艾莉丝 官方角色设定',
+);
+assert.equal(buildSafeFallbackQuery('以下是用户的本轮输入：东京明天天气', 220), '');
 
 const sensitiveQueries = [
     'search sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456',

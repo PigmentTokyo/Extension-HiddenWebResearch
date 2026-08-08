@@ -86,6 +86,7 @@ import {
 import {
     buildSafeFallbackQuery,
     containsSensitiveQueryMaterial,
+    validateSearchQueryCandidate,
 } from './query-safety.js';
 import {
     captureRuntimeClock,
@@ -2800,6 +2801,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     const seenLogicalQueries = [];
     let invalidPlannerResponses = 0;
     let blockedUnsafeQueries = false;
+    let blockedLowQualityQueries = false;
     let hadSearchFailure = false;
     const plannerRuntime = {
         secondaryFailed: false,
@@ -2815,9 +2817,16 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         if (!blockedUnsafeQueries) debugLog('Blocked credential-shaped material from a search query');
         blockedUnsafeQueries = true;
     };
+    const markLowQualityQueryBlocked = reason => {
+        if (!blockedLowQualityQueries) {
+            debugLog('Blocked a planner query that could expose uncompressed user text', { reason });
+        }
+        blockedLowQualityQueries = true;
+    };
     const getFallbackQuery = () => {
-        const query = cleanQuery(buildSafeFallbackQuery(userText, 220));
+        const query = cleanQuery(buildSafeFallbackQuery(userText, 120));
         if (!query && containsSensitiveQueryMaterial(userText)) markUnsafeQueryBlocked();
+        if (!query && !containsSensitiveQueryMaterial(userText)) markLowQualityQueryBlocked('unsafe_full_turn_fallback');
         return query;
     };
     const makeFallbackDecision = () => {
@@ -2909,12 +2918,22 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         if (decision.action !== 'SEARCH') break;
 
         const blockedThisDecision = decision.queries.some(query => containsSensitiveQueryMaterial(query));
+        let lowQualityThisDecision = false;
         const cleanedQueries = decision.queries.map(query => {
             if (containsSensitiveQueryMaterial(query)) {
                 markUnsafeQueryBlocked();
                 return '';
             }
-            return cleanQuery(query);
+            const validation = validateSearchQueryCandidate(query, {
+                userRequest: userText,
+                maxLength: 120,
+            });
+            if (!validation.valid) {
+                lowQualityThisDecision = true;
+                markLowQualityQueryBlocked(validation.reason);
+                return '';
+            }
+            return cleanQuery(validation.query);
         }).filter(Boolean);
         const newQueries = filterNovelQueries(cleanedQueries, seenLogicalQueries, {
             maxQueries: queryLimit,
@@ -2928,11 +2947,21 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             if (fallbackQueries.length) {
                 newQueries.push(...fallbackQueries);
             } else {
+                if (!evidence.length && lowQualityThisDecision && round < settings.maxRounds) {
+                    unresolvedGaps = [...new Set([
+                        ...unresolvedGaps,
+                        'The previous proposed query was rejected because it copied or wrapped the user input. Re-plan it as a standalone search query containing only 3-12 retrieval terms, proper names, and the specific fact to verify. Do not include chat narration, labels, or roleplay prose.',
+                    ])].slice(0, 8);
+                    updateStatus('planning', '规划查询包含用户正文，正在重新提炼');
+                    continue;
+                }
                 if (evidence.length) {
                     researchPartial = true;
                     const unresolvedReason = blockedThisDecision
                         ? 'The hidden planner proposed credential-shaped search material, so the follow-up query was blocked; synthesis may be incomplete.'
-                        : 'The hidden planner requested more research but produced no new executable query; synthesis may be incomplete.';
+                        : lowQualityThisDecision
+                            ? 'The hidden planner copied too much user text into a search query, so the follow-up was blocked; synthesis may be incomplete.'
+                            : 'The hidden planner requested more research but produced no new executable query; synthesis may be incomplete.';
                     unresolvedGaps = [...new Set([
                         ...unresolvedGaps,
                         unresolvedReason,
@@ -2944,6 +2973,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
 
         let successfulSearch = false;
         let blockedPreparedQueryCount = 0;
+        let blockedPreparedUnsafeQueryCount = 0;
         let failedSearchCount = 0;
         for (const candidateQuery of newQueries) {
             if (seenQueries.length >= totalQueryLimit) break;
@@ -2952,14 +2982,32 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 userText,
                 temporalKind,
                 clock: runtimeClock,
+                maxLength: 120,
             });
-            const query = preparedQuery.executedQuery;
-            if (!query || seenQueries.includes(query)) continue;
-            if (containsSensitiveQueryMaterial(query)) {
-                markUnsafeQueryBlocked();
+            const preparedLogicalValidation = validateSearchQueryCandidate(preparedQuery.logicalQuery, {
+                userRequest: userText,
+                maxLength: 120,
+            });
+            const preparedExecutedValidation = validateSearchQueryCandidate(preparedQuery.executedQuery, {
+                userRequest: userText,
+                maxLength: 120,
+            });
+            if (!preparedLogicalValidation.valid || !preparedExecutedValidation.valid) {
+                const failure = !preparedLogicalValidation.valid
+                    ? preparedLogicalValidation
+                    : preparedExecutedValidation;
+                if (failure.reason === 'sensitive_material') {
+                    markUnsafeQueryBlocked();
+                    blockedPreparedUnsafeQueryCount++;
+                } else {
+                    lowQualityThisDecision = true;
+                    markLowQualityQueryBlocked(`post_prepare_${failure.reason}`);
+                }
                 blockedPreparedQueryCount++;
                 continue;
             }
+            const query = preparedExecutedValidation.query;
+            if (!query || seenQueries.includes(query)) continue;
             seenLogicalQueries.push(preparedQuery.logicalQuery || candidateQuery);
             seenQueries.push(query);
             updateStatus('searching', `正在隐藏搜索（${seenQueries.length}/${totalQueryLimit}）`);
@@ -2999,13 +3047,21 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             if (evidenceAtCapacity) break;
         }
         if (successfulSearch && evidence.length) needsFinalAssessment = true;
-        if (evidence.length && (blockedThisDecision || blockedPreparedQueryCount || failedSearchCount || !successfulSearch)) {
+        if (evidence.length && (
+            blockedThisDecision
+            || lowQualityThisDecision
+            || blockedPreparedQueryCount
+            || failedSearchCount
+            || !successfulSearch
+        )) {
             researchPartial = true;
-            const unresolvedReason = blockedThisDecision || blockedPreparedQueryCount
+            const unresolvedReason = blockedThisDecision || blockedPreparedUnsafeQueryCount
                 ? 'One or more planner-requested searches were blocked because the query contained credential-shaped material; synthesis may be incomplete.'
-                : failedSearchCount
-                    ? 'At least one planner-requested web search failed; synthesis may be incomplete.'
-                    : 'The hidden planner requested more research, but no new candidate query was executed; synthesis may be incomplete.';
+                : lowQualityThisDecision
+                    ? 'One or more planner-requested searches copied too much user text and were blocked; synthesis may be incomplete.'
+                    : failedSearchCount
+                        ? 'At least one planner-requested web search failed; synthesis may be incomplete.'
+                        : 'The hidden planner requested more research, but no new candidate query was executed; synthesis may be incomplete.';
             unresolvedGaps = [...new Set([
                 ...unresolvedGaps,
                 unresolvedReason,
@@ -3020,6 +3076,8 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             idleMessage = '搜索无可用结果，已继续普通生成';
         } else if (blockedUnsafeQueries) {
             idleMessage = '已阻止可能包含凭据的搜索查询，已继续普通生成';
+        } else if (blockedLowQualityQueries) {
+            idleMessage = '规划查询过长或复制了用户正文，已阻止发送并继续普通生成';
         } else if (invalidPlannerResponses) {
             idleMessage = '规划结果无效，已继续普通生成';
         }

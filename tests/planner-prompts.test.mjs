@@ -194,7 +194,7 @@ assert.doesNotMatch(longPrompts.userPrompt, new RegExp(`A{${5000}}`, 'u'));
 
 assert.deepEqual(planningSchema.value.properties.action.enum, ['SEARCH', 'DONE']);
 assert.equal(planningSchema.value.properties.queries.maxItems, 2);
-assert.equal(planningSchema.value.properties.queries.items.properties.query.maxLength, 240);
+assert.equal(planningSchema.value.properties.queries.items.properties.query.maxLength, 120);
 assert.equal(planningSchema.value.properties.unresolved.maxItems, 8);
 
 const assessmentSchema = buildPlannerJsonSchema(2, true);

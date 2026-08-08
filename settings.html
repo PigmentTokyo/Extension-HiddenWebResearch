@@ -70,6 +70,7 @@
                         <div class="hwr_hint">
                             这是所选内置策略之上的补充层，同时影响隐藏规划器怎样组织查询，以及搜后主模型怎样使用证据回答；策略名称本身不会切换任何模型。
                             例如主模型是 DeepSeek 而手选 Claude，只表示采用 Claude 启发规则；规划由下方选择的规划 API 执行，最终正文仍由 DeepSeek 执行。
+                            补充提示词属于模型软指令，不能保证规划器每次遵守；插件仍会在真正发送前硬性拦截包装后的用户输入、长叙事和超过 120 字符的查询。
                         </div>
                         <label class="checkbox_label" for="hwr_strategy_custom_enabled">
                             <input type="checkbox" id="hwr_strategy_custom_enabled">

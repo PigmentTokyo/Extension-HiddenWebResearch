@@ -246,7 +246,14 @@ Extras API 与 Selenium Plugin 是例外：由于它们无法给聚合正文提�
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.12.2`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.12.3`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.12.3`：
+
+- 搜索查询增加发送前质量门禁：剥离“以下是用户的本轮输入”等包装语，限制查询为最多 120 个字符，并阻止与用户长篇正文高度重合的规划结果；
+- 规划失败后的本地兜底不再截取整段用户输入；只允许短而明确的直接问题或能安全提取出的显式搜索目标。发现规划器复制正文时会先要求下一轮重新提炼，仍无法得到安全查询才跳过搜索并显示原因；
+- Gemini 等隐藏副规划器的固定提示词与严格 JSON Schema 同步要求精简查询，不改变当前正文模型；
+- 新增 Windows SearXNG 一键安装/修复脚本，备份旧配置后仅加载四个推荐引擎，避免 Wikidata、Startpage、Torch 与 Ahmia 在启动阶段报错。
 
 `1.12.2`：
 

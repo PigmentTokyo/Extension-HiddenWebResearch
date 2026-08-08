@@ -152,6 +152,7 @@ DECISION POLICY
 
 QUERY RULES
 - Make each query standalone, concise, high-intent, and retrieval-oriented. Preserve proper names and useful constraints; do not paste the user's whole request.
+- Aim for 3-12 useful terms and never exceed 120 Unicode characters. Remove chat narration, roleplay prose, preset wrappers, and labels such as "the user's current input" or "latest_user_request".
 - One query must target one concrete evidence purpose. Multiple queries in a round are allowed only within query_limit and when they cover genuinely independent material facets; profile quantities are recommendations, not hidden limits.
 - Never repeat or cosmetically narrow a used query. A follow-up must add a new authority, date range, factual facet, or contradiction check.
 - Prefer primary or official sources when the claim has an identifiable responsible authority. Use site: only when that authority is reasonably inferable.
@@ -218,7 +219,7 @@ export function buildPlannerJsonSchema(queryLimit, evaluationOnly = false) {
                     items: {
                         type: 'object',
                         properties: {
-                            query: { type: 'string', minLength: 2, maxLength: 240 },
+                            query: { type: 'string', minLength: 2, maxLength: 120 },
                             purpose: { type: 'string', minLength: 2, maxLength: 240 },
                             facet: { type: 'string', enum: ['primary', 'independent', 'recency', 'contradiction', 'gap_fill'] },
                         },

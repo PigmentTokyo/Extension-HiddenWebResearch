@@ -111,7 +111,7 @@ assert.ok(
     'preview requests must be filtered before starting search research',
 );
 
-assert.equal(manifest.version, '1.12.2');
+assert.equal(manifest.version, '1.12.3');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -351,7 +351,12 @@ assert.match(plannerPromptsSource, /compactSearchRequest\(latestUserRequest, 400
 assert.match(indexSource, /searchPolicy:\s*settings\.searchPolicy/u);
 assert.match(indexSource, /evidence\.length && decision\.unresolved\.length/u);
 assert.match(indexSource, /if \(unresolvedGaps\.length\) \{\s*researchPartial = true/u);
-assert.match(indexSource, /buildSafeFallbackQuery\(userText, 220\)/u);
+assert.match(indexSource, /buildSafeFallbackQuery\(userText, 120\)/u);
+assert.match(indexSource, /validateSearchQueryCandidate\(preparedQuery\.logicalQuery/u);
+assert.match(indexSource, /validateSearchQueryCandidate\(preparedQuery\.executedQuery/u);
+assert.match(indexSource, /maxLength: 120,/u);
+assert.match(indexSource, /The previous proposed query was rejected because it copied or wrapped the user input/u);
+assert.match(indexSource, /规划查询过长或复制了用户正文，已阻止发送并继续普通生成/u);
 assert.match(indexSource, /containsSensitiveQueryMaterial\(query\)/u);
 assert.match(indexSource, /blockedUnsafeQueries/u);
 assert.match(indexSource, /blockedThisDecision/u);
