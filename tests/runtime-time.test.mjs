@@ -8,7 +8,11 @@ import {
     isRemoteClockRequest,
     prepareAnchoredSearchQuery,
 } from '../runtime-time.js';
-import { containsSensitiveQueryMaterial } from '../query-safety.js';
+import {
+    containsSensitiveQueryMaterial,
+    validatePreparedSearchQuery,
+    validateSearchQueryCandidate,
+} from '../query-safety.js';
 
 const tokyoClock = captureRuntimeClock({
     now: new Date('2026-07-29T20:06:14.000Z'),
@@ -106,6 +110,61 @@ const tomorrowWeatherQuery = prepareAnchoredSearchQuery('Tokyo weather tomorrow'
 });
 assert.match(tomorrowWeatherQuery.executedQuery, /reference UTC instant 2026-07-29T20:06Z$/u);
 
+const shanghaiClockBeforePlannerDate = captureRuntimeClock({
+    now: new Date('2026-08-08T06:00:00.000Z'),
+    timeZone: 'Asia/Shanghai',
+});
+const kimiReportUserText = '详细的告诉我今天发生的新闻，详细！';
+for (const kimiQuery of [
+    '2026年8月9日 今日新闻 要闻汇总',
+    '2026年8月9日 国际新闻 今日发生',
+    '2026-08-09 国际新闻 今日头条',
+]) {
+    const prepared = prepareAnchoredSearchQuery(kimiQuery, {
+        userText: kimiReportUserText,
+        temporalKind: 'relative',
+        clock: shanghaiClockBeforePlannerDate,
+        maxLength: 120,
+    });
+    assert.notEqual(prepared.logicalQuery, kimiReportUserText, kimiQuery);
+    assert.doesNotMatch(prepared.logicalQuery, /详细的告诉我/u, kimiQuery);
+    assert.doesNotMatch(prepared.executedQuery, /2026[-年]0?8[-月]0?9/u, kimiQuery);
+    assert.match(prepared.executedQuery, /target date 2026-08-08 browser timezone Asia\/Shanghai$/u, kimiQuery);
+    assert.equal(prepared.targetDate, '2026-08-08', kimiQuery);
+    assert.equal(validateSearchQueryCandidate(prepared.logicalQuery, {
+        userRequest: kimiReportUserText,
+        maxLength: 120,
+    }).valid, true, kimiQuery);
+    assert.equal(validatePreparedSearchQuery(prepared.executedQuery, {
+        maxLength: 120,
+    }).valid, true, kimiQuery);
+}
+
+const punctuatedPreparedQuery = prepareAnchoredSearchQuery('今日新闻, 国际, 科技', {
+    userText: kimiReportUserText,
+    temporalKind: 'relative',
+    clock: shanghaiClockBeforePlannerDate,
+    maxLength: 120,
+});
+assert.equal(
+    validateSearchQueryCandidate(punctuatedPreparedQuery.executedQuery, {
+        userRequest: kimiReportUserText,
+        maxLength: 120,
+    }).reason,
+    'narrative_text',
+);
+assert.equal(validatePreparedSearchQuery(punctuatedPreparedQuery.executedQuery).valid, true);
+
+assert.deepEqual(
+    prepareAnchoredSearchQuery('2026年8月9日', {
+        userText: kimiReportUserText,
+        temporalKind: 'relative',
+        clock: shanghaiClockBeforePlannerDate,
+        maxLength: 120,
+    }),
+    { logicalQuery: '', executedQuery: '', anchored: true, targetDate: '' },
+);
+
 const historicalQuery = prepareAnchoredSearchQuery('Tokyo weather 2025-07-31', {
     userText: '查询 2025年7月31日东京天气',
     temporalKind: 'relative',
@@ -130,7 +189,10 @@ const alreadyAnchored = prepareAnchoredSearchQuery(
         clock: tokyoClock,
     },
 );
-assert.equal(alreadyAnchored.executedQuery, '东京今天天气 reference UTC instant 2026-07-29T20:06Z');
+assert.doesNotMatch(alreadyAnchored.executedQuery, /东京今天天气/u);
+assert.match(alreadyAnchored.executedQuery, /Tokyo weather timezone Asia\/Tokyo/u);
+assert.match(alreadyAnchored.executedQuery, /target date 2026-07-30/u);
+assert.match(alreadyAnchored.executedQuery, /reference UTC instant 2026-07-29T20:06Z$/u);
 
 const staticQuery = 'site:docs.anthropic.com Messages API tool use';
 assert.deepEqual(
@@ -303,7 +365,7 @@ const staleVersionDate = prepareAnchoredSearchQuery(
     },
 );
 assert.doesNotMatch(staleVersionDate.executedQuery, /2025-07-31/u);
-assert.match(staleVersionDate.executedQuery, /reference date 2026-07-30/u);
+assert.match(staleVersionDate.executedQuery, /target date 2026-07-30/u);
 
 const multiOffsetPlannerConflict = prepareAnchoredSearchQuery(
     'Tokyo weather today',
@@ -314,8 +376,8 @@ const multiOffsetPlannerConflict = prepareAnchoredSearchQuery(
     },
 );
 assert.doesNotMatch(multiOffsetPlannerConflict.logicalQuery, /\btoday\b/iu);
-assert.match(multiOffsetPlannerConflict.logicalQuery, /\byesterday\b/iu);
-assert.match(multiOffsetPlannerConflict.logicalQuery, /\btomorrow\b/iu);
+assert.equal(multiOffsetPlannerConflict.logicalQuery, 'Tokyo weather');
+assert.match(multiOffsetPlannerConflict.executedQuery, /target dates 2026-07-29 2026-07-31/u);
 
 const conflictingPlannerDay = prepareAnchoredSearchQuery('Tokyo weather tomorrow', {
     userText: 'Tokyo weather yesterday',
@@ -323,15 +385,17 @@ const conflictingPlannerDay = prepareAnchoredSearchQuery('Tokyo weather tomorrow
     clock: tokyoClock,
 });
 assert.doesNotMatch(conflictingPlannerDay.logicalQuery, /tomorrow/u);
-assert.match(conflictingPlannerDay.executedQuery, /yesterday reference UTC instant 2026-07-29T20:06Z/u);
+assert.equal(conflictingPlannerDay.logicalQuery, 'Tokyo weather');
+assert.match(conflictingPlannerDay.executedQuery, /target date 2026-07-29 reference UTC instant 2026-07-29T20:06Z/u);
 
 const credentialBearingRewrite = prepareAnchoredSearchQuery('Tokyo weather forecast 2025-07-31', {
     userText: 'api_key=abcdefghijklmnopqrstuvwxyz123456 what is Tokyo weather tomorrow?',
     temporalKind: 'relative',
     clock: tokyoClock,
 });
-assert.match(credentialBearingRewrite.executedQuery, /api_key=/u);
-assert.equal(containsSensitiveQueryMaterial(credentialBearingRewrite.executedQuery), true);
+assert.doesNotMatch(credentialBearingRewrite.executedQuery, /api_key=/u);
+assert.equal(containsSensitiveQueryMaterial(credentialBearingRewrite.executedQuery), false);
+assert.match(credentialBearingRewrite.executedQuery, /Tokyo weather forecast target date 2026-07-31/u);
 
 
 const releaseDateQuery = prepareAnchoredSearchQuery('latest release date for Claude', {
@@ -496,8 +560,9 @@ const remoteWeatherConflict = prepareAnchoredSearchQuery(
         clock: tokyoClock,
     },
 );
-assert.match(remoteWeatherConflict.logicalQuery, /yesterday/u);
+assert.equal(remoteWeatherConflict.logicalQuery, 'New York weather');
 assert.doesNotMatch(remoteWeatherConflict.logicalQuery, /tomorrow/u);
+assert.match(remoteWeatherConflict.executedQuery, /target date 2026-07-29/u);
 
 const remoteWeatherSetConflict = prepareAnchoredSearchQuery(
     'compare New York weather today and tomorrow',
@@ -507,9 +572,9 @@ const remoteWeatherSetConflict = prepareAnchoredSearchQuery(
         clock: tokyoClock,
     },
 );
-assert.match(remoteWeatherSetConflict.logicalQuery, /yesterday/u);
-assert.match(remoteWeatherSetConflict.logicalQuery, /tomorrow/u);
+assert.equal(remoteWeatherSetConflict.logicalQuery, 'compare New York weather');
 assert.doesNotMatch(remoteWeatherSetConflict.logicalQuery, /\btoday\b/u);
+assert.match(remoteWeatherSetConflict.executedQuery, /target dates 2026-07-29 2026-07-31/u);
 
 for (const remoteClockText of [
     'time now in Tokyo',
@@ -553,20 +618,32 @@ const rewrittenHistoricalCutoff = prepareAnchoredSearchQuery(
         clock: tokyoClock,
     },
 );
-assert.equal(rewrittenHistoricalCutoff.executedQuery, 'as of 2025 what Claude models existed');
+assert.equal(rewrittenHistoricalCutoff.executedQuery, 'Claude models as of 2025');
 assert.doesNotMatch(rewrittenHistoricalCutoff.executedQuery, /2026-07-30/u);
 
-for (const [candidateQuery, originalRequest] of [
-    ['Tokyo weather 2025-07-31', 'Tokyo weather today'],
-    ['New York weather 2025-07-31', 'New York weather today'],
-    ['Claude news 2025-07-31', 'latest Claude news'],
+const rewrittenHistoricalDateConflict = prepareAnchoredSearchQuery(
+    'latest Claude models 2026-07-30',
+    {
+        userText: 'as of 2025 what Claude models existed',
+        temporalKind: 'relative',
+        clock: tokyoClock,
+    },
+);
+assert.equal(rewrittenHistoricalDateConflict.executedQuery, 'Claude models as of 2025');
+assert.doesNotMatch(rewrittenHistoricalDateConflict.executedQuery, /2026-07-30/u);
+
+for (const [candidateQuery, originalRequest, expectedLogicalQuery] of [
+    ['Tokyo weather 2025-07-31', 'Tokyo weather today', 'Tokyo weather'],
+    ['New York weather 2025-07-31', 'New York weather today', 'New York weather'],
+    ['Claude news 2025-07-31', 'latest Claude news', 'Claude news'],
 ]) {
     const prepared = prepareAnchoredSearchQuery(candidateQuery, {
         userText: originalRequest,
         temporalKind: 'relative',
         clock: tokyoClock,
     });
-    assert.equal(prepared.logicalQuery, originalRequest);
+    assert.equal(prepared.logicalQuery, expectedLogicalQuery);
+    assert.notEqual(prepared.logicalQuery, originalRequest);
     assert.doesNotMatch(prepared.logicalQuery, /2025-07-31/u);
 }
 

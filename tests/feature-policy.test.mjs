@@ -114,7 +114,7 @@ assert.ok(
     'preview requests must be filtered before starting search research',
 );
 
-assert.equal(manifest.version, '1.13.0');
+assert.equal(manifest.version, '1.13.1');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
@@ -378,7 +378,7 @@ assert.match(indexSource, /buildSafeFallbackQuery\(userText, 120\)/u);
 assert.match(indexSource, /buildSafePurposeFallbackQuery/u);
 assert.match(indexSource, /Recovered a blocked planner query from its concise evidence purpose/u);
 assert.match(indexSource, /validateSearchQueryCandidate\(preparedQuery\.logicalQuery/u);
-assert.match(indexSource, /validateSearchQueryCandidate\(preparedQuery\.executedQuery/u);
+assert.match(indexSource, /validatePreparedSearchQuery\(preparedQuery\.executedQuery/u);
 assert.match(indexSource, /maxLength: 120,/u);
 assert.match(indexSource, /The previous proposed query was rejected because it copied or wrapped the user input/u);
 assert.match(indexSource, /requestSaferQueryReplan/u);
@@ -395,13 +395,20 @@ assert.match(querySafetySource, /PRIVATE KEY|Bearer|api\[_-\]\?key/u);
 assert.match(querySafetySource, /\[middle omitted\]/u);
 
 const anchoringStart = indexSource.indexOf('const preparedQuery = prepareAnchoredSearchQuery');
-const finalQueryStart = indexSource.indexOf('const query = preparedQuery.executedQuery', anchoringStart);
-const finalSafetyStart = indexSource.indexOf('containsSensitiveQueryMaterial(query)', finalQueryStart);
+const logicalSafetyStart = indexSource.indexOf(
+    'validateSearchQueryCandidate(preparedQuery.logicalQuery', anchoringStart,
+);
+const transportSafetyStart = indexSource.indexOf(
+    'validatePreparedSearchQuery(preparedQuery.executedQuery', anchoringStart,
+);
+const finalQueryStart = indexSource.indexOf('const query = preparedExecutedValidation.query', anchoringStart);
 const dispatchStart = indexSource.indexOf('const result = await searchStructuredBackend', anchoringStart);
 assert.ok(anchoringStart >= 0);
-assert.ok(finalSafetyStart > finalQueryStart);
-assert.ok(dispatchStart > finalSafetyStart);
+assert.ok(logicalSafetyStart > anchoringStart);
+assert.ok(transportSafetyStart > logicalSafetyStart);
+assert.ok(finalQueryStart > transportSafetyStart);
 assert.ok(dispatchStart > anchoringStart);
+assert.ok(dispatchStart > finalQueryStart);
 
 const structuredStart = indexSource.indexOf('async function runStructuredSearchResearch');
 const hardOptOutGuard = indexSource.indexOf('hasExplicitNoSearchIntent(userText)', structuredStart);
@@ -583,6 +590,9 @@ for (const id of [
 }
 
 assert.match(visibleSettingsHtml, /id="hwr_searxng_settings"/u);
+assert.match(visibleSettingsHtml, /127\.0\.0\.1:8080/u);
+assert.match(indexSource, /normalizeSearxngBaseUrl\(configuredUrl, \{ allowBlank: false \}\)/u);
+assert.match(indexSource, /getSearxngConfig\(settings\);\s*return;/u);
 assert.match(visibleSettingsHtml, /id="hwr_serpapi_settings"/u);
 assert.match(visibleSettingsHtml, /<option value="direct">自行保存 OpenAI 兼容 URL \+ Key（副 API）<\/option>/u);
 

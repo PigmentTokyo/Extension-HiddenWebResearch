@@ -5,6 +5,7 @@ import {
     buildSafeFallbackQuery,
     compactSearchRequest,
     containsSensitiveQueryMaterial,
+    validatePreparedSearchQuery,
     validateSearchQueryCandidate,
 } from '../query-safety.js';
 
@@ -74,6 +75,21 @@ assert.equal(
     '艾莉丝 官方角色设定',
 );
 assert.equal(buildSafeFallbackQuery('以下是用户的本轮输入：东京明天天气', 220), '');
+
+assert.deepEqual(
+    validatePreparedSearchQuery('东京新闻, 要闻, reference date 2026-08-08 browser timezone Asia/Shanghai'),
+    {
+        valid: true,
+        query: '东京新闻, 要闻, reference date 2026-08-08 browser timezone Asia/Shanghai',
+        reason: 'ok',
+    },
+);
+assert.equal(
+    validatePreparedSearchQuery(`api_key=${'a'.repeat(32)} target date 2026-08-08`).reason,
+    'sensitive_material',
+);
+assert.equal(validatePreparedSearchQuery('x'.repeat(121)).reason, 'too_long');
+assert.equal(validatePreparedSearchQuery('   ').reason, 'empty');
 
 const sensitiveQueries = [
     'search sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456',

@@ -152,6 +152,28 @@ function getTrigramCoverage(candidate, source) {
     return total ? matched / total : 0;
 }
 
+function validateSearchQueryTransport(value, maxLength) {
+    const original = String(value || '');
+    if (containsSensitiveQueryMaterial(original)) {
+        return { valid: false, query: '', reason: 'sensitive_material', cleaned: null };
+    }
+    const cleaned = cleanSearchQueryText(original);
+    const query = cleaned.text;
+    if (!query) return { valid: false, query: '', reason: 'empty', cleaned };
+    if (containsSensitiveQueryMaterial(query)) {
+        return { valid: false, query: '', reason: 'sensitive_material', cleaned };
+    }
+
+    const limit = Math.min(
+        SEARCH_QUERY_HARD_MAX_CHARS,
+        Math.max(16, Math.floor(Number(maxLength) || SEARCH_QUERY_HARD_MAX_CHARS)),
+    );
+    if ([...query].length > limit) {
+        return { valid: false, query: '', reason: 'too_long', cleaned };
+    }
+    return { valid: true, query, reason: 'ok', cleaned };
+}
+
 /**
  * Validates a planner-produced query before it is sent to a search provider.
  * Long narrative copies and prompt-wrapper text fail closed instead of leaking
@@ -162,25 +184,12 @@ export function validateSearchQueryCandidate(value, {
     maxLength = SEARCH_QUERY_HARD_MAX_CHARS,
     allowShortCopy = false,
 } = {}) {
-    const original = String(value || '');
-    if (containsSensitiveQueryMaterial(original)) {
-        return { valid: false, query: '', reason: 'sensitive_material' };
+    const transport = validateSearchQueryTransport(value, maxLength);
+    if (!transport.valid) {
+        return { valid: false, query: '', reason: transport.reason };
     }
-    const cleaned = cleanSearchQueryText(original);
-    const query = cleaned.text;
-    if (!query) return { valid: false, query: '', reason: 'empty' };
-    if (containsSensitiveQueryMaterial(query)) {
-        return { valid: false, query: '', reason: 'sensitive_material' };
-    }
-
-    const limit = Math.min(
-        SEARCH_QUERY_HARD_MAX_CHARS,
-        Math.max(16, Math.floor(Number(maxLength) || SEARCH_QUERY_HARD_MAX_CHARS)),
-    );
+    const { query, cleaned } = transport;
     const queryLength = [...query].length;
-    if (queryLength > limit) {
-        return { valid: false, query: '', reason: 'too_long' };
-    }
     if (cleaned.userInputWrapperRemoved) {
         return { valid: false, query: '', reason: 'wrapped_user_request' };
     }
@@ -202,6 +211,22 @@ export function validateSearchQueryCandidate(value, {
         }
     }
     return { valid: true, query, reason: cleaned.wrapperRemoved ? 'wrapper_removed' : 'ok' };
+}
+
+/**
+ * Revalidates an internally prepared query immediately before transport.
+ * The planner's logical query has already passed the full quality gate, so
+ * trusted date/timezone suffixes must not be mistaken for copied prose or
+ * narrative punctuation. Credential, empty-query and hard-length checks are
+ * deliberately repeated at this final boundary.
+ */
+export function validatePreparedSearchQuery(value, {
+    maxLength = SEARCH_QUERY_HARD_MAX_CHARS,
+} = {}) {
+    const transport = validateSearchQueryTransport(value, maxLength);
+    return transport.valid
+        ? { valid: true, query: transport.query, reason: 'ok' }
+        : { valid: false, query: '', reason: transport.reason };
 }
 
 /**

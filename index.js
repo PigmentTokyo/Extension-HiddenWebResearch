@@ -47,6 +47,7 @@ import {
     normalizeSerperResponse,
     normalizeTavilyResponse,
 } from './search-providers.js';
+import { normalizeSearxngBaseUrl } from './searxng-url.js';
 import {
     buildPlannerJsonSchema,
     buildPlannerPriorTurns,
@@ -89,6 +90,7 @@ import {
     buildSafePurposeFallbackQuery,
     buildSafeFallbackQuery,
     containsSensitiveQueryMaterial,
+    validatePreparedSearchQuery,
     validateSearchQueryCandidate,
 } from './query-safety.js';
 import {
@@ -379,7 +381,14 @@ function normalizeSettings(settings) {
     }
     setValue('researchBackend', backendResolution.researchBackend);
     setValue('enabled', backendResolution.enabled);
-    setValue('searxngUrl', String(settings.searxngUrl || '').trim());
+    const rawSearxngUrl = String(settings.searxngUrl || '').trim();
+    try {
+        setValue('searxngUrl', normalizeSearxngBaseUrl(rawSearxngUrl));
+    } catch {
+        // Preserve invalid legacy text so the UI can show and correct it. The
+        // request boundary validates again and will fail before planning.
+        setValue('searxngUrl', rawSearxngUrl);
+    }
     setValue('searxngPreferences', String(settings.searxngPreferences || '').trim());
     setValue('anysearchZone', ['', 'cn', 'intl'].includes(settings.anysearchZone) ? settings.anysearchZone : '');
     setValue('anysearchLanguage', String(settings.anysearchLanguage || '').trim().slice(0, 20));
@@ -2488,7 +2497,10 @@ async function planNextSearch({
 
 function getSearxngConfig(settings = getSettings()) {
     const webSearchSettings = extension_settings.websearch || {};
-    const baseUrl = settings.searxngUrl || String(webSearchSettings.searxng_url || '').trim() || 'http://localhost:8888';
+    const configuredUrl = settings.searxngUrl
+        || String(webSearchSettings.searxng_url || '').trim()
+        || 'http://localhost:8888';
+    const baseUrl = normalizeSearxngBaseUrl(configuredUrl, { allowBlank: false });
     const preferences = settings.searxngPreferences || String(webSearchSettings.searxng_preferences || '').trim();
     return { baseUrl, preferences };
 }
@@ -3135,7 +3147,10 @@ async function ensureStructuredSearchBackendReady(settings) {
         }
         return;
     }
-    if (backend === 'searxng') return;
+    if (backend === 'searxng') {
+        getSearxngConfig(settings);
+        return;
+    }
     if (backend === 'anysearch' && ENABLE_SERVER_DEPENDENT_FEATURES) return;
     throw new Error('不支持的搜索来源：' + backend);
 }
@@ -3556,8 +3571,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 userRequest: userText,
                 maxLength: 120,
             });
-            const preparedExecutedValidation = validateSearchQueryCandidate(preparedQuery.executedQuery, {
-                userRequest: userText,
+            const preparedExecutedValidation = validatePreparedSearchQuery(preparedQuery.executedQuery, {
                 maxLength: 120,
             });
             if (!preparedLogicalValidation.valid || !preparedExecutedValidation.valid) {
@@ -6265,7 +6279,19 @@ function bindSettingsUi() {
         saveSettingsDebounced();
     });
     $('#hwr_searxng_url').val(settings.searxngUrl).on('change', function () {
-        settings.searxngUrl = String($(this).val()).trim();
+        const rawUrl = String($(this).val()).trim();
+        try {
+            const normalizedUrl = normalizeSearxngBaseUrl(rawUrl);
+            settings.searxngUrl = normalizedUrl;
+            $(this).val(normalizedUrl);
+            if (normalizedUrl && normalizedUrl !== rawUrl) {
+                toastr.info(`已规范化为 ${normalizedUrl}`, 'SearXNG Base URL');
+            }
+        } catch (error) {
+            settings.searxngUrl = rawUrl;
+            updateStatus('error', String(error.message || error));
+            toastr.error(String(error.message || error), 'SearXNG 地址无效');
+        }
         invalidateRun('SearXNG URL changed');
         saveSettingsDebounced();
         updateSettingsSectionSummaries();

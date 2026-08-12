@@ -68,6 +68,8 @@ Z.AI 不在支持列表中，也没有凭据入口或可调用路径。Extras/Se
 
 当前路径不会继续打开并阅读完整网页，因此它属于摘要级研究，不是 Claude/Gemini 原生页面阅读能力的复制。SearXNG Base URL 应使用可信地址；在多人或公网酒馆上允许普通用户任意修改该地址可能形成服务端请求风险。
 
+本机地址可直接填写 `127.0.0.1:8080`、`localhost:8888` 或 `[::1]:8080`，扩展会安全补全 `http://`；粘贴本机 `/search?...` 搜索页地址时也会还原为 Base URL。远程主机不会被擅自假定为 HTTP，必须明确填写 `http://` 或 `https://`。URL 中的账号密码、非 HTTP(S) 协议、额外路径和普通查询参数会在调用规划器前被拒绝。
+
 #### Windows Docker 一键安装或修复
 
 先安装并启动 Docker Desktop，再下载并双击 [P1G-SearXNG-OneClick.bat](./P1G-SearXNG-OneClick.bat)。脚本既能首次安装，也能自动识别并修复旧版一键脚本创建的 `searxng` 容器：它会先按时间戳备份现有 `settings.yml`，再只保留 Google、Bing、DuckDuckGo 与百度，防止仅设置 `disabled: true` 后 Wikidata、Startpage、Torch、Ahmia 仍在容器启动阶段加载。脚本重启容器后会执行一次真实搜索并核对引擎列表。
@@ -270,7 +272,14 @@ Extras API 与 Selenium Plugin 是例外：由于它们无法给聚合正文提�
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.13.0`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.13.1`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.13.1`：
+
+- 修复 Kimi K3 等规划器给出冲突日期时，时间锚处理把已经提炼好的短查询替换成整条用户消息，并随后触发 `post_prepare_narrative_text` / `post_prepare_copied_user_request` 的问题；现在只移除冲突的日期或相对日词，并附加由浏览器时钟计算的目标日期；
+- 将查询检查明确拆成“规划查询质量门禁”和“最终发送安全门禁”：前者继续阻止正文复制、叙事文本、包装语和敏感信息，后者只重复检查凭据、空查询与 120 字符硬上限，避免把插件自己添加的日期、UTC 与时区误判成用户正文；
+- 时间修正不再把用户完整消息作为替代查询；若删除错误时间后没有可用检索主题，会要求剩余规划轮次重新提炼，而不是把正文发送给搜索服务；
+- SearXNG 本机 Base URL 支持自动补全 `http://`，并在隐藏规划前拒绝无协议远程地址、URL 凭据、非 HTTP(S) 协议和无效路径，避免错误一路进入 SillyTavern 后端才显示 `ERR_INVALID_URL`。
 
 `1.13.0`：
 

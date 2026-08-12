@@ -33,6 +33,8 @@ const LOCATION_RELATIVE_QUERY_PATTERN = /(?:(?:\b(?:weather|forecast|temperature
 const HISTORICAL_QUERY_PATTERN = /(?:\b(?:compare|comparison|versus|vs\.?|previous|prior|former|history|historical|baseline|archive)\b|对比|比较|相比|上一版|前一版|历史|基线|归档|此前|之前)/iu;
 const HISTORICAL_CUTOFF_PATTERN = /(?:\b(?:as\s+of|through|up\s+to)\s+(?:19|20)\d{2}\b|截至\s*(?:19|20)\d{2}\s*年?|(?:19|20)\d{2}\s*年\s*(?:当时|以前|之前))/iu;
 const DATE_RANGE_CONTEXT_PATTERN = /(?:\b(?:from|since|after|before|to|through|until|between|as\s+of|date)\s*:?\s*(?:19|20)\d{2}(?:[-/.]\d{1,2}[-/.]\d{1,2})?|(?:自|从|截至|之后|以前|之前|至|到|之间)\s*(?:19|20)\d{2}(?:\s*年|\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}))/iu;
+const RELATIVE_DAY_TOKEN_PATTERN = /(?:\bday\s+after\s+tomorrow\b|\b(?:today|tonight|tomorrow|yesterday|now)\b|后天|後天|明日|明天|昨日|昨天|今日|今天|今晚|现在|當前|当前)/giu;
+const CURRENT_RELEVANCE_TOKEN_PATTERN = /(?:\b(?:latest|current|currently|recent|recently|today|now)\b|最新|当前|目前|现在|今日|今天|最近|近期)/giu;
 
 function normalizeText(value) {
     return String(value || '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
@@ -164,6 +166,33 @@ function extractIndependentCompleteDates(value) {
             .map(normalizeCompleteDateToken)
             .filter(Boolean),
     )];
+}
+
+function removeIndependentCompleteDates(value, dates) {
+    const blockedDates = new Set(Array.isArray(dates) ? dates : []);
+    if (!blockedDates.size) return normalizeText(value);
+    const withoutWesternDates = String(value || '').replace(
+        /(^|[^\p{L}\p{N}_-])((?:19|20)\d{2}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2})(?=$|[^\p{L}\p{N}_-])/gu,
+        (match, prefix, token) => blockedDates.has(normalizeCompleteDateToken(token)) ? prefix : match,
+    );
+    return normalizeText(withoutWesternDates.replace(
+        /((?:19|20)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日?)/gu,
+        token => blockedDates.has(normalizeCompleteDateToken(token)) ? ' ' : token,
+    ));
+}
+
+function removeRelativeDayTokens(value) {
+    return normalizeText(String(value || '')
+        .replace(RELATIVE_DAY_TOKEN_PATTERN, ' ')
+        .replace(/(?:\b(?:and|or|versus|vs\.?)\b|[和及与、])\s*$/iu, ' '));
+}
+
+function makeTargetDateSuffix(dates) {
+    const uniqueDates = [...new Set((Array.isArray(dates) ? dates : []).filter(Boolean))].sort();
+    if (!uniqueDates.length) return '';
+    return uniqueDates.length === 1
+        ? `target date ${uniqueDates[0]}`
+        : `target dates ${uniqueDates.join(' ')}`;
 }
 
 function truncateWithSuffix(value, suffix, maxLength) {
@@ -367,23 +396,56 @@ export function prepareAnchoredSearchQuery(query, {
     const queryOffsetOutsideUserIntent = queryRelativeDayOffsets.length > 0
         && userRelativeDayOffsets.length > 0
         && queryRelativeDayOffsets.some(offset => !userRelativeDayOffsets.includes(offset));
-    const querySeed = queryOffsetOutsideUserIntent || plannerDateConflict
-        ? normalizedUserText
-        : baseQuery;
+    let querySeed = baseQuery;
+    let forcedTargetDates = [];
 
     if (
         HISTORICAL_CUTOFF_PATTERN.test(querySeed)
-        || HISTORICAL_CUTOFF_PATTERN.test(normalizedUserText)
     ) {
-        const unchanged = (
-            HISTORICAL_CUTOFF_PATTERN.test(querySeed) ? querySeed : normalizedUserText
-        ).slice(0, boundedLength).trim();
+        const unchanged = querySeed.slice(0, boundedLength).trim();
         return { logicalQuery: unchanged, executedQuery: unchanged, anchored: unchanged !== baseQuery, targetDate: '' };
     }
 
-    if (isRemoteClockRequest(querySeed)) {
+    const userHistoricalCutoff = HISTORICAL_CUTOFF_PATTERN.exec(normalizedUserText)?.[0] || '';
+    if (userHistoricalCutoff) {
+        const historicalTopic = removeIndependentCompleteDates(
+            querySeed.replace(CURRENT_RELEVANCE_TOKEN_PATTERN, ' '),
+            plannerAddedDates,
+        );
+        if (!historicalTopic) {
+            return { logicalQuery: '', executedQuery: '', anchored: true, targetDate: '' };
+        }
+        const historicalQuery = truncateWithSuffix(historicalTopic, userHistoricalCutoff, boundedLength);
+        return {
+            logicalQuery: historicalQuery,
+            executedQuery: historicalQuery,
+            anchored: historicalQuery !== baseQuery,
+            targetDate: '',
+        };
+    }
+
+    if (queryOffsetOutsideUserIntent) {
+        querySeed = removeRelativeDayTokens(querySeed);
+        forcedTargetDates = userRelativeDayOffsets.map(offset => shiftIsoDate(clock.localDate, offset));
+    }
+    if (plannerDateConflict) {
+        querySeed = removeIndependentCompleteDates(querySeed, plannerAddedDates);
+        forcedTargetDates = userExpectedDates;
+    }
+    if (!querySeed) {
+        return { logicalQuery: '', executedQuery: '', anchored: true, targetDate: '' };
+    }
+
+    const forcedTargetDateSuffix = makeTargetDateSuffix(forcedTargetDates);
+    const remoteClockRequest = isRemoteClockRequest(baseQuery)
+        || isRemoteClockRequest(normalizedUserText);
+
+    if (remoteClockRequest) {
         const utcMinute = String(clock.capturedAtUtc || '').slice(0, 16);
-        const suffix = utcMinute ? `reference UTC instant ${utcMinute}Z` : '';
+        const suffix = [
+            forcedTargetDateSuffix,
+            utcMinute ? `reference UTC instant ${utcMinute}Z` : '',
+        ].filter(Boolean).join(' ');
         if (/\breference\s+UTC\s+instant\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$/iu.test(querySeed)) {
             const unchanged = querySeed.slice(0, boundedLength).trim();
             return {
@@ -405,7 +467,10 @@ export function prepareAnchoredSearchQuery(query, {
     if (locationSensitiveRequest) {
         const logicalQuery = querySeed;
         const utcMinute = String(clock.capturedAtUtc || '').slice(0, 16);
-        const suffix = utcMinute ? `reference UTC instant ${utcMinute}Z` : '';
+        const suffix = [
+            forcedTargetDateSuffix,
+            utcMinute ? `reference UTC instant ${utcMinute}Z` : '',
+        ].filter(Boolean).join(' ');
         const executedQuery = truncateWithSuffix(logicalQuery, suffix, boundedLength);
         return {
             logicalQuery,
@@ -422,10 +487,12 @@ export function prepareAnchoredSearchQuery(query, {
             : effectiveKind !== 'none' && userRelativeDayOffsets.length === 1
                 ? userRelativeDayOffsets
                 : [];
-    const targetDates = relativeDayOffsets.length
+    const targetDates = forcedTargetDates.length
+        ? forcedTargetDates
+        : relativeDayOffsets.length
         ? relativeDayOffsets.map(offset => shiftIsoDate(clock.localDate, offset))
         : [clock.localDate];
-    const targetDate = relativeDayOffsets.length === 1 ? targetDates[0] : clock.localDate;
+    const targetDate = targetDates.length === 1 ? targetDates[0] : clock.localDate;
     const logicalQuery = querySeed.slice(0, boundedLength).trim();
 
     const hasDate = hasResolvedDate(logicalQuery, targetDate);
@@ -443,9 +510,11 @@ export function prepareAnchoredSearchQuery(query, {
     const dateLabel = relativeDayOffsets.length === 1 && relativeDayOffsets[0] !== 0
         ? 'target date'
         : 'reference date';
-    const suffix = hasDate
-        ? `browser timezone ${clock.timeZone}`
-        : `${dateLabel} ${targetDate} browser timezone ${clock.timeZone}`;
+    const suffix = forcedTargetDateSuffix
+        ? `${forcedTargetDateSuffix} browser timezone ${clock.timeZone}`
+        : hasDate
+            ? `browser timezone ${clock.timeZone}`
+            : `${dateLabel} ${targetDate} browser timezone ${clock.timeZone}`;
     const executedQuery = truncateWithSuffix(logicalQuery, suffix, boundedLength);
     return {
         logicalQuery,
