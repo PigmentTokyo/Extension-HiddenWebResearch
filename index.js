@@ -417,7 +417,7 @@ function normalizeSettings(settings) {
     clampInteger('recentContextChars', 2000, 30000);
     clampInteger('maxCharsPerQuery', 1000, 12000);
     clampInteger('maxEvidenceChars', 2000, 40000);
-    clampInteger('requestTimeoutMs', 5000, 60000);
+    clampInteger('requestTimeoutMs', 5000, 180000);
     clampInteger('reuseSeconds', 0, 3600);
     setValue('schemaVersion', defaultSettings.schemaVersion);
     return changed;

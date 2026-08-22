@@ -272,7 +272,11 @@ Extras API 与 Selenium Plugin 是例外：由于它们无法给聚合正文提�
 https://github.com/PigmentTokyo/Extension-HiddenWebResearch
 ```
 
-当前版本为 `1.13.1`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+当前版本为 `1.13.2`。最低支持 SillyTavern `1.13.3`；兼容范围覆盖 `1.13.3–1.18.x`。`manifest.json` 保持 `auto_update: false`，已经安装的用户需要在扩展管理器中手动检查并执行更新。
+
+`1.13.2`：
+
+- 将“单请求超时”的可配置上限由 `60000 ms` 提升到 `180000 ms`；规划器和普通搜索请求现在可按用户设置最多等待 3 分钟，默认值仍保持 `20000 ms`。
 
 `1.13.1`：
 

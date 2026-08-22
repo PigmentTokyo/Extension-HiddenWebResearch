@@ -114,8 +114,10 @@ assert.ok(
     'preview requests must be filtered before starting search research',
 );
 
-assert.equal(manifest.version, '1.13.1');
+assert.equal(manifest.version, '1.13.2');
 assert.equal(manifest.minimum_client_version, '1.13.3');
+assert.match(indexSource, /clampInteger\('requestTimeoutMs', 5000, 180000\)/u);
+assert.match(visibleSettingsHtml, /id="hwr_timeout_ms"[^>]*min="5000"[^>]*max="180000"/u);
 assert.equal(manifest.display_name, 'P1G搜（颜料搜）');
 assert.equal(manifest.generate_interceptor, 'HiddenWebResearch_Intercept');
 assert.match(visibleSettingsHtml, /<b>P1G搜（颜料搜）<\/b>/u);
