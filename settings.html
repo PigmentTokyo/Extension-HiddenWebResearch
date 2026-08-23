@@ -287,6 +287,10 @@
                 <div class="hwr_hint">本机可直接填写 <code>127.0.0.1:8080</code> 或 <code>localhost:8888</code>，插件会自动补全 <code>http://</code>；远程地址必须明确填写 <code>http://</code> 或 <code>https://</code>。</div>
                 <label for="hwr_searxng_preferences">Preferences string（可选）</label>
                 <input id="hwr_searxng_preferences" class="text_pole" type="text" placeholder="空白时继承 WebSearch">
+                <label for="hwr_searxng_direct_fetch" class="hwr_checkbox_row">
+                    <input id="hwr_searxng_direct_fetch" type="checkbox">
+                    <span>直连 SearXNG（绕过 /api/search/searxng；用于 TauriTavern 等无该路由的客户端，需 SearXNG 支持 CORS）</span>
+                </label>
                 <button id="hwr_test_searxng" class="menu_button hwr_button" type="button">
                     <i class="fa-solid fa-magnifying-glass"></i>
                     <span>测试 SearXNG（不调用模型）</span>
