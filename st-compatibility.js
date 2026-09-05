@@ -45,6 +45,18 @@ export function supportsGeminiToolChoiceNone(clientVersion) {
 }
 
 /**
+ * Keep the existing native-Google protocol restriction scoped to that
+ * protocol. OpenAI-compatible routes are guarded by observed responses.
+ */
+export function requiresGeminiResearchPacket({ source, model, clientVersion } = {}) {
+    const normalizedModel = String(model || '').trim();
+    const nativeGoogleSource = ['makersuite', 'vertexai', 'google']
+        .includes(String(source || '').trim().toLowerCase());
+    return nativeGoogleSource && (/(?:^|\/)gemini-3(?:[.-]|$)/iu.test(normalizedModel)
+        || !supportsGeminiToolChoiceNone(clientVersion));
+}
+
+/**
  * Connection Profile and custom Chat Completion requests only forward their
  * exact secret ID from SillyTavern 1.18.0 onward. Older clients fall back to
  * the provider's globally active key and therefore cannot safely isolate a

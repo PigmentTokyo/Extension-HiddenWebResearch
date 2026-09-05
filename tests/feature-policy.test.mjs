@@ -114,7 +114,7 @@ assert.ok(
     'preview requests must be filtered before starting search research',
 );
 
-assert.equal(manifest.version, '1.13.2');
+assert.equal(manifest.version, '1.13.3');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.match(indexSource, /clampInteger\('requestTimeoutMs', 5000, 180000\)/u);
 assert.match(visibleSettingsHtml, /id="hwr_timeout_ms"[^>]*min="5000"[^>]*max="180000"/u);
@@ -317,15 +317,13 @@ assert.match(indexSource, /name:\s*'hwr_web_search'/u);
 assert.match(researchTransportSource, /role:\s*'assistant',\s*\n\s*content:\s*'',\s*\n\s*tool_calls:/u);
 assert.match(researchTransportSource, /role:\s*'tool',\s*\n\s*tool_call_id:/u);
 assert.match(researchTransportSource, /assistant\.reasoning_content = ''/u);
-assert.match(indexSource, /supportsGeminiToolChoiceNone\(CLIENT_VERSION\)/u);
+assert.match(indexSource, /requiresGeminiResearchPacket\(\{ source, model, clientVersion: CLIENT_VERSION \}\)/u);
 assert.match(indexSource, /CLIENT_COMPATIBILITY\.requestRewrite/u);
 assert.match(indexSource, /request\.tool_choice = 'none'/u);
 assert.match(indexSource, /requestSource === 'deepseek'/u);
 assert.match(indexSource, /delete request\.tools/u);
 assert.match(indexSource, /delete request\.tool_choice/u);
-assert.match(indexSource, /isGemini3/u);
-assert.match(indexSource, /\['makersuite', 'vertexai', 'google'\]/u);
-assert.match(indexSource, /if \(isGemini3\) return false/u);
+// Model/source transport decisions are exercised by gemini-transport-gate.test.mjs.
 assert.match(indexSource, /if \(normalizedSource === 'deepseek'\) return true/u);
 assert.match(indexSource, /activePromptInjection && hasInjectedResearchMarker\(request\)/u);
 assert.match(indexSource, /applyActiveVariableInjection\(request, \{ finalChance: true \}\)/u);

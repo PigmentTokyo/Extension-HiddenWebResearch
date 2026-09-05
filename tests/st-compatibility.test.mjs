@@ -123,9 +123,9 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 assert.equal(manifest.minimum_client_version, MINIMUM_SUPPORTED_CLIENT_VERSION);
-assert.equal(manifest.version, '1.13.2');
+assert.equal(manifest.version, '1.13.3');
 assert.match(indexSource, /CLIENT_VERSION/u);
-assert.match(indexSource, /supportsGeminiToolChoiceNone\(CLIENT_VERSION\)/u);
+assert.match(indexSource, /requiresGeminiResearchPacket\(\{ source, model, clientVersion: CLIENT_VERSION \}\)/u);
 assert.match(indexSource, /buildCompletedClientToolMessages/u);
 assert.match(indexSource, /CLIENT_COMPATIBILITY\.supported/u);
 assert.match(indexSource, /clientVersion:\s*CLIENT_VERSION/u);

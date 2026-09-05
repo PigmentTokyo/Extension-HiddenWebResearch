@@ -126,6 +126,7 @@ import {
     formatSearchLogEntries,
 } from './search-log.js';
 import { extractGeminiGroundedAnswer } from './gemini-grounding.js';
+import { createResearchResponseGuard } from './research-response-guard.js';
 import {
     canonicalizeUrl,
     detectResearchStrategy,
@@ -147,7 +148,7 @@ import {
     inspectSillyTavernCompatibility,
     isCompatibleGenerationRequest,
     MINIMUM_SUPPORTED_CLIENT_VERSION,
-    supportsGeminiToolChoiceNone,
+    requiresGeminiResearchPacket,
     supportsPlannerDirectSecretId,
 } from './st-compatibility.js';
 import {
@@ -247,6 +248,7 @@ let runEpoch = 0;
 let activeRunEpoch = null;
 let activeAbortController = null;
 let activeToolTransport = null;
+let researchResponseGuard = null;
 let activePromptInjection = false;
 let activeVariableInjection = null;
 let generationStartSnapshot = null;
@@ -1461,11 +1463,21 @@ function enforcePlannerDirectCredentialWindowRequest(request) {
     if (sentinelSecretId) request.secret_id = sentinelSecretId;
 }
 
+function guardResearchRequest(request, enforceNone) {
+    const epoch = runEpoch;
+    const chatId = SillyTavern.getContext().chatId;
+    researchResponseGuard?.register(request, {
+        enforceNone,
+        isCurrent: () => getSettings().enabled && isRunCurrent(epoch, chatId),
+    });
+}
+
 function handleChatCompletionSettingsReady(request) {
     if (!request || typeof request !== 'object') return;
     applyActiveVariableInjection(request, { finalChance: true });
     if (activePromptInjection && hasInjectedResearchMarker(request)) {
         disableVendorNativeSearch(request);
+        if (isCompatibleGenerationRequest(request, HANDLED_GENERATION_TYPES)) guardResearchRequest(request, false);
     }
 
     const pending = activeToolTransport;
@@ -1480,6 +1492,15 @@ function handleChatCompletionSettingsReady(request) {
     if (markerMessageIndex < 0) return;
 
     disableVendorNativeSearch(request);
+    if (researchResponseGuard?.hasFailed(request) || requiresGeminiResearchPacket({
+        source: request.chat_completion_source,
+        model: request.model,
+        clientVersion: CLIENT_VERSION,
+    })) {
+        activeToolTransport = null;
+        updateStatus('ready', '当前连接已保留隐藏研究包');
+        return;
+    }
     const realUserFound = hasCurrentUserMessageForTransport(request.messages, {
         markerMessageIndex,
         startMarker: pending.startMarker,
@@ -1518,6 +1539,7 @@ function handleChatCompletionSettingsReady(request) {
     } else {
         appendClientSearchToolDefinition(request);
     }
+    guardResearchRequest(request, true);
     activeToolTransport = null;
     setResearchPrompt('');
     updateStatus('ready', `已通过隐藏工具结果注入（${toolCalls.length} 次客户端搜索，非厂商原生）`);
@@ -1534,6 +1556,7 @@ function clearPrompt() {
 
 function invalidateRun(reason, { clearCaches = false } = {}) {
     runEpoch++;
+    researchResponseGuard?.clear();
     clearPrompt();
     if (activeAbortController) {
         activeAbortController.abort(reason);
@@ -2071,12 +2094,14 @@ function isClientToolTransportSupported() {
     if (context.mainApi !== 'openai') return false;
     const { source, model } = getCurrentModelInfo();
     const normalizedSource = source.trim().toLowerCase();
+    const settings = context.chatCompletionSettings || {};
+    if (researchResponseGuard?.hasFailed({
+        chat_completion_source: source, model,
+        custom_url: settings.custom_url,
+        reverse_proxy: settings.reverse_proxy,
+    })) return false;
+    if (requiresGeminiResearchPacket({ source, model, clientVersion: CLIENT_VERSION })) return false;
     if (normalizedSource === 'deepseek') return true;
-    const isGeminiSource = ['makersuite', 'vertexai', 'google'].includes(normalizedSource);
-    if (isGeminiSource && !supportsGeminiToolChoiceNone(CLIENT_VERSION)) return false;
-    const isGemini3 = isGeminiSource
-        && /^gemini-3(?:[.-]|$)/iu.test(model.trim());
-    if (isGemini3) return false;
     try {
         return Boolean(context.isToolCallingSupported?.());
     } catch {
@@ -6485,6 +6510,17 @@ function bindSettingsUi() {
 globalThis.HiddenWebResearch_Intercept = hiddenWebResearchInterceptor;
 
 if (CLIENT_COMPATIBILITY.supported) {
+    researchResponseGuard = createResearchResponseGuard({
+        fetchImpl: globalThis.fetch.bind(globalThis),
+        baseUrl: globalThis.location.href,
+        onViolation: ({ retrying }) => {
+            updateStatus('partial', retrying
+                ? '模型再次调用已完成的搜索工具，正在用研究包重试一次'
+                : '模型再次调用已完成的搜索工具，请重新生成；当前连接本页已回退研究包');
+            updateResolvedTransportLabel();
+        },
+    });
+    globalThis.fetch = researchResponseGuard.fetch;
     eventSource.makeFirst(event_types.GENERATION_STARTED, (type, options, dryRun) => {
         try {
             const context = SillyTavern.getContext();
