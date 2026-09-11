@@ -750,10 +750,24 @@ function makePlannerDecision(action, queryPlans, unresolved, maxQueries) {
  *
  * @param {unknown} rawValue Planner output.
  * @param {number} maxQueries Maximum accepted queries.
+ * @param {Function} [onDiagnostic] Optional metadata-only parse observer.
  * @returns {{action: 'SEARCH'|'DONE'|'INVALID', queries: string[], queryPurposes: string[], unresolved: string[]}}
  */
-export function parsePlannerDecision(rawValue, maxQueries = Number.POSITIVE_INFINITY) {
+export function parsePlannerDecision(rawValue, maxQueries = Number.POSITIVE_INFINITY, onDiagnostic = () => {}) {
     const raw = String(rawValue || '').trim();
+    const finish = (action, queryPlans, unresolved, format, reason = '') => {
+        const decision = makePlannerDecision(action, queryPlans, unresolved, maxQueries);
+        if (!reason) {
+            reason = decision.action !== 'INVALID' ? 'ok'
+                : action === 'SEARCH' ? 'search_without_queries'
+                    : action === 'DONE' ? 'done_with_queries' : 'unsupported_action';
+        }
+        try {
+            onDiagnostic({ format, reason, action: decision.action, queryCount: decision.queries.length });
+        } catch { /* Observers must not affect parsing or generation. */ }
+        return decision;
+    };
+    let failedJson = false;
     const actionMatches = [...raw.matchAll(/<action>\s*(SEARCH|DONE)\s*<\/action>/giu)];
     if (actionMatches.length) {
         const action = actionMatches[actionMatches.length - 1][1].toUpperCase();
@@ -762,7 +776,7 @@ export function parsePlannerDecision(rawValue, maxQueries = Number.POSITIVE_INFI
         const unresolved = [
             ...raw.matchAll(/<(?:unresolved|unresolved_gap|gap)>\s*([\s\S]*?)\s*<\/(?:unresolved|unresolved_gap|gap)>/giu),
         ].map(match => decodeXmlText(match[1]));
-        return makePlannerDecision(action, queryPlans, unresolved, maxQueries);
+        return finish(action, queryPlans, unresolved, 'xml');
     }
 
     const jsonText = findFirstJsonObject(raw);
@@ -784,20 +798,23 @@ export function parsePlannerDecision(rawValue, maxQueries = Number.POSITIVE_INFI
             const validAction = normalizedAction === 'SEARCH' || normalizedAction === 'DONE';
             const statusAgrees = !hasStatus || normalizedStatus === normalizedAction;
             const action = validAction && statusAgrees ? normalizedAction : 'INVALID';
-            return makePlannerDecision(action, queryPlans, unresolved, maxQueries);
+            const reason = !hasAction ? 'missing_action' : !validAction ? 'unsupported_action'
+                : !statusAgrees ? 'conflicting_status' : '';
+            return finish(action, queryPlans, unresolved, 'json', reason);
         } catch {
+            failedJson = true;
             // Fall through to the plain-text compatibility parser.
         }
     }
 
     const plainSearch = raw.match(/(?:^|\n)\s*SEARCH\s*:\s*(.+)$/iu);
     if (plainSearch) {
-        return makePlannerDecision('SEARCH', [plainSearch[1]], [], maxQueries);
+        return finish('SEARCH', [plainSearch[1]], [], 'plain');
     }
     if (/(?:^|\n)\s*DONE\s*(?:$|\n)/iu.test(raw)) {
-        return makePlannerDecision('DONE', [], [], maxQueries);
+        return finish('DONE', [], [], 'plain');
     }
-    return makePlannerDecision('INVALID', [], [], maxQueries);
+    return finish('INVALID', [], [], 'unknown', !raw ? 'empty_response' : failedJson ? 'malformed_json' : 'no_supported_format');
 }
 
 /**

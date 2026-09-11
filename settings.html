@@ -657,6 +657,33 @@
                 </label>
             </details>
 
+            <details id="hwr_diagnostic_section" class="hwr_section">
+                <summary>
+                    <span class="hwr_summary_title">排查日志（自动收集）</span>
+                    <span id="hwr_diagnostic_summary" class="hwr_summary_meta" aria-live="polite">0 条事件</span>
+                </summary>
+                <div class="hwr_section_body">
+                    <div class="hwr_notice">
+                        遇到问题后，直接导出文件发给作者，无需开启调试或 F12。自动记录版本、模型、相关设置、每轮规划、查询拦截原因、搜索耗时和结果数量。
+                    </div>
+                    <div class="hwr_hint" id="hwr_diagnostic_privacy">
+                        仅保存在本页内存，最多 240 条事件、200,000 字符。刷新、切换聊天或清空后删除；清空时正在运行的旧请求不会补回记录。不记录聊天原文、搜索词、网页正文、规划器完整回复、原始错误、URL 或密钥；自定义提示词仅记录开关和长度。
+                    </div>
+                    <div class="hwr_button_row">
+                        <button id="hwr_export_diagnostics" class="menu_button" type="button">
+                            <i class="fa-solid fa-download"></i><span>导出排查日志</span>
+                        </button>
+                        <button id="hwr_copy_diagnostics" class="menu_button" type="button">
+                            <i class="fa-solid fa-copy"></i><span>复制排查日志</span>
+                        </button>
+                        <button id="hwr_clear_diagnostics" class="menu_button" type="button">
+                            <i class="fa-solid fa-trash-can"></i><span>清空排查日志</span>
+                        </button>
+                    </div>
+                    <textarea id="hwr_diagnostic_preview" class="text_pole" rows="10" readonly hidden aria-label="排查日志文本，可手动复制" aria-describedby="hwr_diagnostic_privacy" spellcheck="false"></textarea>
+                </div>
+            </details>
+
             <details id="hwr_search_log_section" class="hwr_section hwr_search_log">
                 <summary>
                     <span class="hwr_summary_title">本页搜索日志</span>

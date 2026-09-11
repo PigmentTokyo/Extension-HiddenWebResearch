@@ -114,7 +114,7 @@ assert.ok(
     'preview requests must be filtered before starting search research',
 );
 
-assert.equal(manifest.version, '1.13.3');
+assert.equal(manifest.version, '1.13.4');
 assert.equal(manifest.minimum_client_version, '1.13.3');
 assert.match(indexSource, /clampInteger\('requestTimeoutMs', 5000, 180000\)/u);
 assert.match(visibleSettingsHtml, /id="hwr_timeout_ms"[^>]*min="5000"[^>]*max="180000"/u);

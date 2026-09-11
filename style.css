@@ -561,6 +561,20 @@
     border-top: 1px solid var(--SmartThemeBorderColor);
 }
 
+#hwr_diagnostic_preview {
+    width: 100%;
+    max-width: 100%;
+    min-height: 160px;
+    resize: vertical;
+    font-family: monospace;
+    font-size: 0.8em;
+    overflow-wrap: anywhere;
+}
+
+#hwr_diagnostic_preview[hidden] {
+    display: none;
+}
+
 .hwr_search_log_meta,
 .hwr_search_log_date,
 .hwr_search_log_url {

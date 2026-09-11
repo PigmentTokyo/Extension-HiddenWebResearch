@@ -125,6 +125,7 @@ import {
     createSearchLogEntry,
     formatSearchLogEntries,
 } from './search-log.js';
+import { createDiagnosticRecorder, downloadDiagnosticReport } from './diagnostic-log.js';
 import { extractGeminiGroundedAnswer } from './gemini-grounding.js';
 import { createResearchResponseGuard } from './research-response-guard.js';
 import {
@@ -255,6 +256,7 @@ let generationStartSnapshot = null;
 let searchLogEntries = [];
 let searchLogSequence = 0;
 let searchLogGeneration = 0;
+const diagnostics = createDiagnosticRecorder();
 let pausedBackendMigration = '';
 let plannerDirectCredentialRequestGuard = null;
 const plannerDirectCredentialSealedRequests = new WeakMap();
@@ -1760,6 +1762,105 @@ function debugLog(...args) {
     }
 }
 
+function getDiagnosticContext(settings = getSettings()) {
+    const current = getCurrentModelInfo();
+    let planner = { ...current, available: true };
+    if (settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.DIRECT) {
+        const selected = getPlannerDirectProfileMetadata(settings);
+        planner = {
+            source: 'custom', model: selected?.model,
+            available: Boolean(getSelectedPlannerDirectProfile(settings)),
+            endpointConfigured: Boolean(selected?.apiUrl),
+        };
+    } else if (settings.plannerConnectionMode === PLANNER_CONNECTION_MODES.PROFILE) {
+        const selected = getPlannerProfileService()?.getSupportedProfiles()
+            .find(item => item.id === settings.plannerProfileId);
+        planner = {
+            source: selected?.api, model: selected?.model,
+            available: Boolean(selected), endpointConfigured: Boolean(selected?.['api-url']),
+        };
+    }
+    return {
+        clientVersion: CLIENT_VERSION,
+        userAgent: navigator.userAgent, language: navigator.language,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        currentModel: { ...current, available: true }, plannerModel: planner,
+        resolvedAdapter: detectAdapter(), settings,
+    };
+}
+
+function renderDiagnosticSummary() {
+    $('#hwr_diagnostic_summary').text(`${diagnostics.count()} 条事件`);
+}
+
+function startDiagnosticRun(settings, type, input, temporalKind) {
+    const token = diagnostics.scope();
+    const startedAt = Date.now();
+    const trace = (event, data = {}) => {
+        try {
+            diagnostics.record(event, data, token);
+            renderDiagnosticSummary();
+        } catch { /* Diagnostics must not affect the generation. */ }
+    };
+    try {
+        trace('run_started', {
+            context: getDiagnosticContext(settings), type, temporalKind,
+            inputLength: String(input || '').length,
+            inputLines: String(input || '').split(/\r?\n/u).length,
+            sensitiveInput: containsSensitiveQueryMaterial(input),
+        });
+    } catch {
+        trace('run_started', { type, reason: 'context_unavailable' });
+    }
+    return { trace, startedAt };
+}
+
+function prepareDiagnosticReport() {
+    const text = JSON.stringify(diagnostics.report(getDiagnosticContext()), null, 2);
+    $('#hwr_diagnostic_preview').val(text).prop('hidden', false);
+    return text;
+}
+
+function exportDiagnosticLog() {
+    try {
+        const text = prepareDiagnosticReport();
+        const filename = `P1G-diagnostics-${new Date().toISOString().replace(/[:.]/gu, '-')}.json`;
+        downloadDiagnosticReport(text, { document, URL, Blob, setTimeout }, filename);
+        toastr.success('排查日志已生成；若没有下载，可点击“复制排查日志”', DISPLAY_NAME);
+    } catch {
+        toastr.error('下载失败，请复制下方日志文本', DISPLAY_NAME);
+    }
+}
+
+async function copyDiagnosticLog() {
+    try {
+        const text = prepareDiagnosticReport();
+        let copied = false;
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            } catch { /* HTTP/mobile browsers can use the visible textarea. */ }
+        }
+        if (!copied) {
+            const textarea = document.getElementById('hwr_diagnostic_preview');
+            textarea.focus();
+            textarea.select();
+            textarea.setSelectionRange(0, textarea.value.length);
+            if (!document.execCommand('copy')) throw new Error('Clipboard unavailable');
+        }
+        toastr.success('排查日志已复制', DISPLAY_NAME);
+    } catch {
+        toastr.info('请长按或全选下方日志文本，手动复制', DISPLAY_NAME);
+    }
+}
+
+function clearDiagnosticLog() {
+    diagnostics.clear();
+    $('#hwr_diagnostic_preview').val('').prop('hidden', true);
+    renderDiagnosticSummary();
+}
+
 function normalizeWhitespace(value) {
     return String(value || '').replace(/\s+/gu, ' ').trim();
 }
@@ -2313,7 +2414,7 @@ function getPlannerProfileOverridePayload() {
     };
 }
 
-async function generatePlannerWithCurrent({ adapter, generateOptions, queryLimit, evaluationOnly }) {
+async function generatePlannerWithCurrent({ adapter, generateOptions, queryLimit, evaluationOnly, trace = () => {} }) {
     const requestTuningHook = request => applyPlannerRequestTuning(request, adapter);
     const canTuneRequest = CLIENT_COMPATIBILITY.requestRewrite;
     if (canTuneRequest) {
@@ -2327,6 +2428,7 @@ async function generatePlannerWithCurrent({ adapter, generateOptions, queryLimit
                     jsonSchema: buildPlannerJsonSchema(queryLimit, evaluationOnly),
                 });
             } catch (error) {
+                trace('planner_schema_fallback', { evaluationOnly, error });
                 debugLog('Kimi K3 strict planner schema was rejected; retrying with prompt-only JSON', error.message || String(error));
                 return await generateRaw(generateOptions);
             }
@@ -2372,6 +2474,8 @@ async function planNextSearch({
     runtimeClock,
     plannerRuntime = null,
 }) {
+    const trace = plannerRuntime?.trace || (() => {});
+    const planningStartedAt = Date.now();
     const prompts = buildPlannerPrompts({
         adapter,
         latestUserRequest,
@@ -2399,6 +2503,7 @@ async function planNextSearch({
         generateOptions,
         queryLimit,
         evaluationOnly,
+        trace,
     });
     const messages = [
         { role: 'system', content: prompts.systemPrompt },
@@ -2421,6 +2526,7 @@ async function planNextSearch({
         effectiveMode,
         Boolean(plannerRuntime?.secondaryFailed),
     );
+    trace('planner_started', { round, evaluationOnly, queryLimit, maxTokens: responseLength, mode, configuredMode });
     let secondarySignal = null;
     const runCurrentFallback = ({ error, failedSignal = null, allowed }) => (
         runAbortableRequest(fallbackSignal => fallbackPlannerToCurrent({
@@ -2465,6 +2571,7 @@ async function planNextSearch({
                 return execute(signal);
             }, settings.requestTimeoutMs);
         } catch (error) {
+            trace('planner_request_failed', { round, evaluationOnly, mode, error, durationMs: Date.now() - planningStartedAt });
             if (plannerRuntime) {
                 plannerRuntime.secondaryFailed = true;
             }
@@ -2486,6 +2593,10 @@ async function planNextSearch({
         }
     }
     const raw = routed.text;
+    trace('planner_response', {
+        round, evaluationOnly, source: routed.source, fallbackUsed: routed.fallbackUsed,
+        responseLength: String(raw || '').length, durationMs: Date.now() - planningStartedAt,
+    });
     debugLog('Planner response received', {
         round,
         evaluationOnly,
@@ -2493,8 +2604,11 @@ async function planNextSearch({
         fallbackUsed: routed.fallbackUsed,
         length: String(raw).length,
     });
-    let decision = parsePlannerDecision(raw, evaluationOnly ? 1 : queryLimit);
+    let decision = parsePlannerDecision(raw, evaluationOnly ? 1 : queryLimit, data => {
+        trace('planner_parse', { ...data, round, evaluationOnly, source: routed.source });
+    });
     if (decision.action === 'INVALID' && routed.source !== PLANNER_CONNECTION_MODES.CURRENT) {
+        trace('planner_invalid_response', { round, source: routed.source });
         if (plannerRuntime) {
             plannerRuntime.secondaryFailed = true;
         }
@@ -2509,7 +2623,13 @@ async function planNextSearch({
                 allowed: true,
             });
             const fallbackRaw = fallback.text;
-            decision = parsePlannerDecision(fallbackRaw, evaluationOnly ? 1 : queryLimit);
+            decision = parsePlannerDecision(fallbackRaw, evaluationOnly ? 1 : queryLimit, data => {
+                trace('planner_parse', { ...data, round, evaluationOnly, source: PLANNER_CONNECTION_MODES.CURRENT, fallbackUsed: true });
+            });
+            trace('planner_response', {
+                round, evaluationOnly, source: PLANNER_CONNECTION_MODES.CURRENT, fallbackUsed: true,
+                responseLength: String(fallbackRaw || '').length, durationMs: Date.now() - planningStartedAt,
+            });
             debugLog('Invalid secondary planner response replaced by current-model fallback', {
                 round,
                 evaluationOnly,
@@ -2517,6 +2637,10 @@ async function planNextSearch({
             });
         }
     }
+    trace('planner_decision', {
+        round, evaluationOnly, action: decision.action,
+        queryCount: decision.queries.length, unresolvedCount: decision.unresolved.length,
+    });
     return decision;
 }
 
@@ -3303,29 +3427,34 @@ function makeResearchCacheKey(chatId, adapter, userText, backend, plannerContext
     return `${chatId ?? ''}:${backend}:${adapter}:${hashString(userText)}:${conversationFingerprint}:${configurationFingerprint}`;
 }
 
-async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runtimeClock, temporalKind = 'none' }) {
+async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runtimeClock, temporalKind = 'none', trace = null }) {
     const logGeneration = searchLogGeneration;
+    trace ??= () => {};
     const latestUser = getLatestUserMessage(chat);
     if (!latestUser) return null;
 
     const userText = normalizeWhitespace(latestUser.mes);
     if (hasExplicitNoSearchIntent(userText)) {
+        trace('research_skipped', { reason: 'explicit_no_search' });
         updateStatus('idle', '已遵从本条不联网要求（未调用规划器或搜索服务）');
         return null;
     }
 
     const explicitSearch = hasExplicitSearchIntent(userText);
     const localGate = evaluateNativeResearchGate(userText, settings.searchPolicy);
+    trace('local_gate', { reason: localGate.reason, shouldCall: localGate.shouldCall, explicitSearch });
     const remoteClockRequest = isRemoteClockRequest(userText)
         || isLocationRelativeRequest(userText)
         || (temporalKind !== 'none' && isLiveClockTopic(userText));
     if (settings.searchPolicy === 'explicit' && !explicitSearch) {
+        trace('research_skipped', { reason: 'explicit_search_required' });
         updateStatus('idle', '本条消息未显式要求搜索');
         return null;
     }
 
     const adapter = detectAdapter();
     const priorTurns = buildPlannerPriorTurns(chat, latestUser, settings);
+    trace('planner_context', { priorTurnCount: priorTurns.length });
     const providerConfiguration = getStructuredSearchConfiguration(settings.researchBackend, settings);
     const researchConfiguration = {
         provider: settings.researchBackend,
@@ -3355,6 +3484,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     );
     const cached = researchCache.get(cacheKey);
     if (settings.reuseSeconds > 0 && cached && cached.timestamp + settings.reuseSeconds * 1000 >= Date.now()) {
+        trace('research_complete', { reason: 'cache_reuse', cacheHit: true, queryCount: cached.queries.length });
         updateStatus('ready', `已复用隐藏研究（${cached.queries.length} 次搜索）`);
         const cachedResearch = cached.research || {
             packet: cached.packet,
@@ -3373,7 +3503,14 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         return cachedResearch;
     }
 
-    await ensureStructuredSearchBackendReady(settings);
+    trace('backend_preflight_started', { backend: settings.researchBackend });
+    try {
+        await ensureStructuredSearchBackendReady(settings);
+    } catch (error) {
+        trace('backend_preflight_failed', { backend: settings.researchBackend, error });
+        throw error;
+    }
+    trace('backend_preflight_passed', { backend: settings.researchBackend });
 
     const totalQueryLimit = getEffectiveTotalQueryLimit(adapter, settings);
     let sourceState = { sources: [], nextSourceNumber: 1 };
@@ -3391,26 +3528,31 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     let blockedLowQualityQueries = false;
     let hadSearchFailure = false;
     const plannerRuntime = {
+        trace,
         secondaryFailed: false,
         fallbackUsed: false,
         fallbackNotified: false,
         isCurrent: () => isRunCurrent(epoch, chatId),
     };
+    let diagnosticRound = 0;
     const mustSearch = localGate.shouldCall;
     const fallbackPurpose = explicitSearch
         ? 'explicit user request'
         : `local web-need gate: ${localGate.reason}`;
     const markUnsafeQueryBlocked = () => {
+        trace('query_blocked', { round: diagnosticRound, reason: 'sensitive_material' });
         if (!blockedUnsafeQueries) debugLog('Blocked credential-shaped material from a search query');
         blockedUnsafeQueries = true;
     };
     const markLowQualityQueryBlocked = reason => {
+        trace('query_blocked', { round: diagnosticRound, reason });
         if (!blockedLowQualityQueries) {
             debugLog('Blocked a planner query that could expose uncompressed user text', { reason });
         }
         blockedLowQualityQueries = true;
     };
     const requestSaferQueryReplan = () => {
+        trace('query_replan_requested', { round: diagnosticRound });
         unresolvedGaps = [...new Set([
             ...unresolvedGaps,
             'The previous proposed query was rejected because it copied or wrapped the user input. Re-plan it as a standalone search query containing only 3-12 retrieval terms, proper names, and the specific fact to verify. Do not include chat narration, labels, or roleplay prose.',
@@ -3434,6 +3576,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     };
 
     for (let round = 1; round <= settings.maxRounds; round++) {
+        diagnosticRound = round;
         if (!isRunCurrent(epoch, chatId)) return null;
         const remainingQueries = totalQueryLimit - seenQueries.length;
         const queryLimit = getEffectiveRoundQueryLimit(adapter, round, settings, remainingQueries);
@@ -3458,6 +3601,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             });
         } catch (error) {
             if (!isRunCurrent(epoch, chatId)) return null;
+            trace('planner_failed', { round, error });
             if (evidence.length) {
                 debugLog('Planner failed after evidence was collected', { message: error.message || String(error) });
                 researchPartial = true;
@@ -3522,6 +3666,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         const blockedThisDecision = decision.queries.some(query => containsSensitiveQueryMaterial(query));
         let lowQualityThisDecision = false;
         const cleanedQueries = decision.queries.map((query, queryIndex) => {
+            trace('query_candidate', { round, queryIndex, queryLength: [...String(query)].length, purposeLength: String(decision.queryPurposes[queryIndex] || '').length });
             if (containsSensitiveQueryMaterial(query)) {
                 markUnsafeQueryBlocked();
                 return '';
@@ -3537,6 +3682,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                     { userRequest: userText, maxLength: 120 },
                 );
                 if (recoveredQuery) {
+                    trace('query_recovered', { round, queryIndex, reason: validation.reason, queryLength: [...recoveredQuery].length });
                     debugLog('Recovered a blocked planner query from its concise evidence purpose', {
                         reason: validation.reason,
                     });
@@ -3603,6 +3749,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 const failure = !preparedLogicalValidation.valid
                     ? preparedLogicalValidation
                     : preparedExecutedValidation;
+                trace('prepared_query_blocked', { round, reason: failure.reason, stage: !preparedLogicalValidation.valid ? 'logical' : 'executed' });
                 if (failure.reason === 'sensitive_material') {
                     markUnsafeQueryBlocked();
                     blockedPreparedUnsafeQueryCount++;
@@ -3617,9 +3764,15 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             if (!query || seenQueries.includes(query)) continue;
             seenLogicalQueries.push(preparedQuery.logicalQuery || candidateQuery);
             seenQueries.push(query);
+            const searchStartedAt = Date.now();
+            trace('search_started', { round, backend: settings.researchBackend, queryLength: [...query].length, queryCount: seenQueries.length });
             updateStatus('searching', `正在隐藏搜索（${seenQueries.length}/${totalQueryLimit}）`);
             try {
                 const result = await searchStructuredBackendWithLog(query, settings, 'research', logGeneration);
+                trace('search_complete', {
+                    round, backend: settings.researchBackend, durationMs: Date.now() - searchStartedAt,
+                    resultCount: result.items.length, cacheHit: Boolean(result.cacheHit), aggregateResult: Boolean(result.aggregateEvidence?.text),
+                });
                 sourceState = mergeStructuredSourceBatch(
                     sourceState,
                     result.items.map(item => ({ ...item, query })),
@@ -3649,6 +3802,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
                 if (!isRunCurrent(epoch, chatId)) return null;
                 hadSearchFailure = true;
                 failedSearchCount++;
+                trace('search_failed', { round, backend: settings.researchBackend, error, durationMs: Date.now() - searchStartedAt });
                 debugLog('Search failed', { message: error.message || String(error) });
             }
             if (evidenceAtCapacity) break;
@@ -3687,6 +3841,11 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
     }
 
     if (!evidence.length) {
+        trace('research_skipped', {
+            reason: seenQueries.length ? 'no_results' : blockedUnsafeQueries ? 'sensitive_material'
+                : blockedLowQualityQueries ? 'unsafe_short_query' : invalidPlannerResponses ? 'invalid_planner' : 'no_search_needed',
+            queryCount: seenQueries.length,
+        });
         let idleMessage = '模型判断本条无需联网';
         if (seenQueries.length) {
             idleMessage = '搜索无可用结果，已继续普通生成';
@@ -3741,6 +3900,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
             }
         } catch (error) {
             if (!isRunCurrent(epoch, chatId)) return null;
+            trace('assessment_failed', { error });
             debugLog('Final sufficiency assessment failed', { message: error.message || String(error) });
             researchPartial = true;
             unresolvedGaps = [...new Set([
@@ -3784,6 +3944,7 @@ async function runStructuredSearchResearch({ chat, chatId, epoch, settings, runt
         researchPartial,
         retrievedAtUtc: runtimeClock.capturedAtUtc,
     };
+    trace('research_complete', { queryCount: seenQueries.length, resultCount: sourceState.sources.length, partial: researchPartial, evidenceLength: packet.length, forcePromptTransport });
     if (settings.reuseSeconds > 0 && !researchPartial) {
         researchCache.set(cacheKey, {
             timestamp: Date.now(),
@@ -4352,8 +4513,10 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
     const temporalKind = classifyTemporalRequest(latestUser?.mes);
     const epoch = ++runEpoch;
     activeRunEpoch = epoch;
+    const { trace, startedAt } = startDiagnosticRun(settings, type, latestUser?.mes, temporalKind);
     try {
         if (temporalKind === 'clock_only') {
+            trace('research_skipped', { reason: 'local_clock_only' });
             setResearchPrompt(buildTrustedRuntimeClockPrompt(runtimeClock, { clockOnly: true }));
             updateStatus('ready', '已注入本地日期与时间（未调用规划器或搜索服务）');
             return;
@@ -4375,7 +4538,7 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
         const researchResult = ENABLE_SERVER_DEPENDENT_FEATURES && settings.researchBackend === 'claude_profile'
             ? await runClaudeProfileResearch({ chat: conversationChat, chatId, epoch, settings })
             : await runStructuredSearchResearch({
-                chat: conversationChat, chatId, epoch, settings, runtimeClock, temporalKind,
+                chat: conversationChat, chatId, epoch, settings, runtimeClock, temporalKind, trace,
             });
         if (!isRunCurrent(epoch, chatId)) return;
         if (!researchResult && temporalKind === 'none') return;
@@ -4407,6 +4570,7 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
             : [];
 
         if (transport === 'tool' && invocations.length) {
+            trace('research_injection', { transport: 'tool', queryCount: invocations.length });
             const envelope = buildToolTransportEnvelope({
                 runtimeClock,
                 research: researchResult,
@@ -4427,6 +4591,7 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
             researchResult.packet,
         ].filter(Boolean).join('\n\n');
         setResearchPrompt(fallbackPrompt);
+        trace('research_injection', { transport: 'prompt', forcePromptTransport: Boolean(researchResult.forcePromptTransport) });
         const fallbackReason = settings.resultInjectionPosition === 'variable'
             ? '已按设置使用指定酒馆变量槽；变量中只放临时标记，研究资料将在请求构造后替换'
             : researchResult.forcePromptTransport
@@ -4437,6 +4602,7 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
         updateStatus(researchResult.researchPartial ? 'partial' : 'ready', fallbackReason);
     } catch (error) {
         if (isRunCurrent(epoch, chatId)) {
+            trace('run_failed', { error });
             const message = error?.name === 'AbortError'
                 ? '隐藏研究已停止，继续普通生成'
                 : `联网处理失败，继续普通生成：${error.message || error}`;
@@ -4445,6 +4611,7 @@ async function hiddenWebResearchInterceptor(chat, _contextSize, abortGeneration,
         }
         clearPrompt();
     } finally {
+        trace('run_finished', { durationMs: Date.now() - startedAt, cancelled: !isRunCurrent(epoch, chatId) });
         if (activeRunEpoch === epoch) {
             activeRunEpoch = null;
         }
@@ -6474,6 +6641,12 @@ function bindSettingsUi() {
         toastr.success('已清理', DISPLAY_NAME);
     });
     $('#hwr_copy_search_log').on('click', copySearchLogToClipboard);
+    $('#hwr_export_diagnostics').on('click', exportDiagnosticLog);
+    $('#hwr_copy_diagnostics').on('click', copyDiagnosticLog);
+    $('#hwr_clear_diagnostics').on('click', () => {
+        clearDiagnosticLog();
+        toastr.success('排查日志已清空；从下一轮生成开始重新收集', DISPLAY_NAME);
+    });
     $('#hwr_clear_search_log').on('click', () => {
         clearSearchLog();
         toastr.success('搜索日志已清空', DISPLAY_NAME);
@@ -6496,6 +6669,7 @@ function bindSettingsUi() {
     updateResolvedTransportLabel();
     switchBackendUi();
     renderSearchLog();
+    renderDiagnosticSummary();
     if (pausedBackendMigration) {
         const previousBackend = pausedBackendMigration;
         pausedBackendMigration = '';
@@ -6564,6 +6738,7 @@ if (CLIENT_COMPATIBILITY.supported) {
         generationStartSnapshot = null;
         invalidateRun('Chat changed', { clearCaches: true });
         clearSearchLog();
+        clearDiagnosticLog();
         updateStatus('idle', '聊天已切换，临时研究与搜索日志已清理');
     });
 }
