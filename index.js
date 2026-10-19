@@ -43,6 +43,7 @@ import {
     normalizeAnySearchResponse,
     normalizeKoboldCppResponse,
     normalizeLegacyBrowserSearchResponse,
+    normalizeDeepSeekSearchResponse,
     normalizeSerpApiResponse,
     normalizeSerperResponse,
     normalizeTavilyResponse,
@@ -207,6 +208,7 @@ const defaultSettings = {
     anysearchLanguage: '',
     serpapiLanguage: '',
     serpapiCountry: '',
+    deepseekSearchKey: '',
     extrasEngine: 'google',
     seleniumEngine: 'google',
     claudeProfileId: '',
@@ -398,6 +400,7 @@ function normalizeSettings(settings) {
     setValue('anysearchLanguage', String(settings.anysearchLanguage || '').trim().slice(0, 20));
     setValue('serpapiLanguage', String(settings.serpapiLanguage || '').trim().toLowerCase().slice(0, 20));
     setValue('serpapiCountry', String(settings.serpapiCountry || '').trim().toLowerCase().slice(0, 2));
+    setValue('deepseekSearchKey', String(settings.deepseekSearchKey || '').trim().slice(0, 500));
     setValue('extrasEngine', BROWSER_SEARCH_ENGINES.has(settings.extrasEngine) ? settings.extrasEngine : 'google');
     setValue('seleniumEngine', BROWSER_SEARCH_ENGINES.has(settings.seleniumEngine) ? settings.seleniumEngine : 'google');
     setValue('claudeProfileId', String(settings.claudeProfileId || ''));
@@ -1625,7 +1628,7 @@ function initializeSettingsLayout() {
     }
 
     const sourceBody = $('#hwr_source_section > .hwr_section_body');
-    for (const backend of ['searxng', 'serpapi', 'tavily', 'serper', 'koboldcpp', 'extras', 'selenium']) {
+    for (const backend of ['searxng', 'serpapi', 'tavily', 'serper', 'deepseek', 'koboldcpp', 'extras', 'selenium']) {
         sourceBody.append($('#hwr_' + backend + '_settings'));
     }
 
@@ -1656,6 +1659,10 @@ function getSourceSectionState(settings = getSettings()) {
     const label = getSearchBackendLabel(backend);
     if (['serpapi', 'tavily', 'serper'].includes(backend)) {
         const ready = Boolean(getActiveSearchApiSecret(backend));
+        return { label, text: ready ? 'Key 已保存' : '缺少 Key', missing: !ready };
+    }
+    if (backend === 'deepseek') {
+        const ready = Boolean(getDeepSeekSearchKey(settings));
         return { label, text: ready ? 'Key 已保存' : '缺少 Key', missing: !ready };
     }
     if (backend === 'koboldcpp') {
@@ -2677,6 +2684,18 @@ function getSharedSearchApiConfig(provider) {
     };
 }
 
+const DEEPSEEK_SEARCH_URL = 'https://api.deepseek.com/v1/tools/search';
+
+function getDeepSeekSearchKey(settings = getSettings()) {
+    return String(settings.deepseekSearchKey || '').trim();
+}
+
+function getDeepSeekSearchConfig(settings = getSettings()) {
+    // Fingerprint only: the raw key must never enter run configuration or logs.
+    const key = getDeepSeekSearchKey(settings);
+    return { keyHash: key ? hashString(key) : '' };
+}
+
 function getKoboldCppConfig() {
     const baseUrl = String(textgenerationwebui_settings?.server_urls?.[textgen_types.KOBOLDCPP] || '').trim();
     return { baseUrl };
@@ -2699,6 +2718,7 @@ function getStructuredSearchConfiguration(backend, settings = getSettings()) {
     if (backend === 'searxng') return getSearxngConfig(settings);
     if (backend === 'anysearch') return getAnySearchConfig(settings);
     if (['serpapi', 'tavily', 'serper'].includes(backend)) return getSharedSearchApiConfig(backend);
+    if (backend === 'deepseek') return getDeepSeekSearchConfig(settings);
     if (backend === 'koboldcpp') return getKoboldCppConfig();
     if (['extras', 'selenium'].includes(backend)) return getBrowserSearchConfig(backend, settings);
     return {};
@@ -2711,6 +2731,7 @@ function getSearchBackendLabel(backend) {
         searxng: 'SearXNG',
         tavily: 'Tavily',
         serper: 'Serper',
+        deepseek: 'DeepSeek',
         koboldcpp: 'KoboldCpp',
         extras: 'Extras API',
         selenium: 'Selenium Plugin',
@@ -3126,6 +3147,33 @@ async function searchSerper(query, settings) {
     );
 }
 
+async function searchDeepSeek(query, settings) {
+    const key = getDeepSeekSearchKey(settings);
+    if (!key) throw new Error('尚未保存 DeepSeek Key');
+    const count = Math.min(10, Math.max(1, Number.parseInt(settings.maxResultsPerQuery, 10) || 10));
+    const cacheKey = [
+        'deepseek', hashString(key), query.toLowerCase(), count,
+        settings.maxCharsPerQuery, settings.includeSourceLinks,
+    ].join('\n');
+    const cached = getCachedSearchResult(cacheKey, settings);
+    if (cached) return cached;
+
+    // DeepSeek allows browser CORS, so this goes direct without a server route.
+    const response = await runAbortableRequest(signal => fetch(DEEPSEEK_SEARCH_URL, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query.slice(0, 128), count }),
+        signal,
+    }), settings.requestTimeoutMs);
+    if (!response.ok) throw new Error(getSearchApiFailureMessage('deepseek', response.status));
+
+    const payload = await readSearchJson(response, 'DeepSeek');
+    const normalized = normalizeDeepSeekSearchResponse(payload, count);
+    return buildUrlBackedSearchResult(
+        query, normalized.items, settings, cacheKey, 'DeepSeek 没有返回带来源 URL 的可用结果',
+    );
+}
+
 async function searchKoboldCpp(query, settings) {
     const { baseUrl } = getKoboldCppConfig();
     if (!baseUrl) throw new Error('尚未在 SillyTavern 中配置 KoboldCpp URL');
@@ -3270,6 +3318,10 @@ async function ensureStructuredSearchBackendReady(settings) {
         if (!getSharedSearchApiConfig(backend).secretId) throw new Error('尚未保存 ' + label + ' Key');
         return;
     }
+    if (backend === 'deepseek') {
+        if (!getDeepSeekSearchKey(settings)) throw new Error('尚未保存 DeepSeek Key');
+        return;
+    }
     if (backend === 'koboldcpp') {
         if (!getKoboldCppConfig().baseUrl) throw new Error('尚未在 SillyTavern 中配置 KoboldCpp URL');
         return;
@@ -3314,6 +3366,7 @@ async function searchStructuredBackend(query, settings) {
     if (settings.researchBackend === 'serpapi') return searchSerpApi(query, settings);
     if (settings.researchBackend === 'tavily') return searchTavily(query, settings);
     if (settings.researchBackend === 'serper') return searchSerper(query, settings);
+    if (settings.researchBackend === 'deepseek') return searchDeepSeek(query, settings);
     if (settings.researchBackend === 'koboldcpp') return searchKoboldCpp(query, settings);
     if (settings.researchBackend === 'extras') return searchExtras(query, settings);
     if (settings.researchBackend === 'selenium') return searchSelenium(query, settings);
@@ -3375,6 +3428,7 @@ function buildResearchPacket({
         serpapi: 'The evidence was gathered through the configured SerpAPI search source.',
         tavily: 'The evidence was gathered through the configured Tavily search source.',
         serper: 'The evidence was gathered through the configured Serper search source.',
+        deepseek: 'The evidence was gathered through the configured DeepSeek Search API.',
         koboldcpp: 'The evidence was gathered through the configured KoboldCpp web search source.',
         extras: 'The evidence was gathered through the configured legacy Extras API websearch module.',
         selenium: 'The evidence was gathered through the configured Selenium search server plugin.',
@@ -4852,6 +4906,7 @@ function switchBackendUi({ openSource = false } = {}) {
     $('#hwr_serpapi_settings').toggle(backend === 'serpapi');
     $('#hwr_tavily_settings').toggle(backend === 'tavily');
     $('#hwr_serper_settings').toggle(backend === 'serper');
+    $('#hwr_deepseek_settings').toggle(backend === 'deepseek');
     $('#hwr_koboldcpp_settings').toggle(backend === 'koboldcpp');
     $('#hwr_extras_settings').toggle(backend === 'extras');
     $('#hwr_selenium_settings').toggle(backend === 'selenium');
@@ -6245,13 +6300,49 @@ async function testPlannerProfile() {
     }
 }
 
+function updateDeepSeekKeyStatus(pendingText = '') {
+    const saved = Boolean(getDeepSeekSearchKey());
+    $('#hwr_deepseek_status').text(pendingText || (saved ? 'Key 已保存在本扩展设置中' : '尚未保存 Key'));
+    $('#hwr_deepseek_key').attr('placeholder', saved ? '已保存；留空不会替换 Key' : '输入 DeepSeek API Key');
+}
+
+function saveDeepSeekSearchKey() {
+    const key = String($('#hwr_deepseek_key').val() || '').trim();
+    if (!key) {
+        toastr.info('没有输入新的 DeepSeek Key', DISPLAY_NAME);
+        updateDeepSeekKeyStatus();
+        return;
+    }
+    getSettings().deepseekSearchKey = key;
+    $('#hwr_deepseek_key').val('');
+    invalidateRun('DeepSeek key changed', { clearCaches: true });
+    saveSettingsDebounced();
+    updateDeepSeekKeyStatus();
+    updateSettingsSectionSummaries();
+    toastr.success('DeepSeek Key 已保存', DISPLAY_NAME);
+}
+
+function clearDeepSeekSearchKey() {
+    if (!getDeepSeekSearchKey()) {
+        toastr.info('当前没有 DeepSeek Key');
+        return;
+    }
+    if (!confirm('确定删除已保存的 DeepSeek Key 吗？')) return;
+    getSettings().deepseekSearchKey = '';
+    invalidateRun('DeepSeek key cleared', { clearCaches: true });
+    saveSettingsDebounced();
+    updateDeepSeekKeyStatus();
+    updateSettingsSectionSummaries();
+    toastr.success('DeepSeek Key 已删除', DISPLAY_NAME);
+}
+
 async function testStructuredSearchConnection(backend) {
     const logGeneration = searchLogGeneration;
     if (activeRunEpoch !== null) {
         toastr.warning('隐藏研究正在运行，请等待本轮结束后再测试搜索服务');
         return;
     }
-    if (['serpapi', 'tavily', 'serper'].includes(backend)
+    if (['serpapi', 'tavily', 'serper', 'deepseek'].includes(backend)
         && !confirm('这会实际消耗一次 ' + getSearchBackendLabel(backend) + ' 搜索额度。继续吗？')) return;
     const settings = getSettings();
     const label = getSearchBackendLabel(backend);
@@ -6574,6 +6665,9 @@ function bindSettingsUi() {
         $(definition.saveSelector).on('click', () => saveSearchApiKey(provider));
         $('#hwr_clear_' + provider + '_key').on('click', () => clearSearchApiKey(provider));
     }
+    $('#hwr_deepseek_key').on('input', () => updateDeepSeekKeyStatus('有未保存的 Key'));
+    $('#hwr_save_deepseek_key').on('click', saveDeepSeekSearchKey);
+    $('#hwr_clear_deepseek_key').on('click', clearDeepSeekSearchKey);
     if (ENABLE_SERVER_DEPENDENT_FEATURES) {
         const anySearchDefinition = getSearchApiDefinition('anysearch');
         $(anySearchDefinition.keySelector).on('input', () => updateSearchApiCredentialStatus('anysearch', '有未保存的 Key'));
@@ -6627,6 +6721,7 @@ function bindSettingsUi() {
     }
     $('#hwr_test_tavily').on('click', () => testStructuredSearchConnection('tavily'));
     $('#hwr_test_serper').on('click', () => testStructuredSearchConnection('serper'));
+    $('#hwr_test_deepseek').on('click', () => testStructuredSearchConnection('deepseek'));
     $('#hwr_test_koboldcpp').on('click', () => testStructuredSearchConnection('koboldcpp'));
     $('#hwr_test_extras').on('click', () => testStructuredSearchConnection('extras'));
     $('#hwr_test_selenium').on('click', () => testStructuredSearchConnection('selenium'));
@@ -6662,6 +6757,7 @@ function bindSettingsUi() {
     for (const provider of ['serpapi', 'tavily', 'serper']) {
         updateSearchApiCredentialStatus(provider);
     }
+    updateDeepSeekKeyStatus();
     refreshPlannerProfiles();
     refreshPlannerDirectProfilesUi();
     updateResolvedAdapterLabel();

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
     normalizeAnySearchResponse,
+    normalizeDeepSeekSearchResponse,
     normalizeKoboldCppResponse,
     normalizeLegacyBrowserSearchResponse,
     normalizeSerpApiResponse,
@@ -304,3 +305,20 @@ assert.deepEqual(normalizeLegacyBrowserSearchResponse('not an object'), {
 });
 
 console.log('Search provider normalizers: all assertions passed');
+
+const deepSeek = normalizeDeepSeekSearchResponse({
+    trace_id: 'must-not-survive',
+    results: [
+        { title: 'Doc', url: 'https://example.com/d#x', summary: 'summary text', snippet: 'snip', date: '2026-01-02' },
+        { title: 'Dup', url: 'https://example.com/d', summary: 'dup' },
+        { title: 'Bad', url: 'ftp://example.com/x', summary: 'bad' },
+        { title: 'Snippet only', url: 'https://example.com/s', snippet: 'fallback' },
+    ],
+}, 10);
+assert.deepEqual(deepSeek.items, [
+    { title: 'Doc', url: 'https://example.com/d', snippet: 'summary text', published: '2026-01-02' },
+    { title: 'Snippet only', url: 'https://example.com/s', snippet: 'fallback', published: '' },
+]);
+assert.equal(JSON.stringify(deepSeek).includes('must-not-survive'), false);
+assert.deepEqual(normalizeDeepSeekSearchResponse(null).items, []);
+assert.equal(normalizeDeepSeekSearchResponse({ results: deepSeek.items.concat(deepSeek.items) }, 1).items.length, 1);
