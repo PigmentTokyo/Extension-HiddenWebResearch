@@ -27,6 +27,7 @@ assert.deepEqual(STOCK_RESEARCH_BACKENDS, [
     'serpapi',
     'tavily',
     'serper',
+    'deepseek',
     'koboldcpp',
 ]);
 assert.deepEqual(OPTIONAL_COMPONENT_RESEARCH_BACKENDS, ['extras', 'selenium']);
@@ -39,6 +40,7 @@ const publicBackends = [
     'serpapi',
     'tavily',
     'serper',
+    'deepseek',
     'koboldcpp',
     'extras',
     'selenium',
@@ -485,7 +487,7 @@ for (const id of [
 }
 assert.match(indexSource, /\$\(definition\.saveSelector\)\.on\('click', \(\) => saveSearchApiKey\(provider\)\)/u);
 assert.match(indexSource, /#hwr_clear_' \+ provider \+ '_key'\)\.on\('click', \(\) => clearSearchApiKey\(provider\)\)/u);
-for (const backend of ['tavily', 'serper', 'koboldcpp', 'extras', 'selenium']) {
+for (const backend of ['tavily', 'serper', 'deepseek', 'koboldcpp', 'extras', 'selenium']) {
     assert.match(
         indexSource,
         new RegExp(`#hwr_test_${backend}'\\)\\.on\\('click', \\(\\) => testStructuredSearchConnection\\('${backend}'\\)`, 'u'),

@@ -152,6 +152,26 @@ export function normalizeSerperResponse(payload, maxResults = 10) {
 }
 
 /**
+ * Converts a DeepSeek Search API response into URL-backed results. Only the
+ * result list is inspected; trace IDs and usage metadata are discarded.
+ *
+ * @param {unknown} payload DeepSeek search response JSON
+ * @param {number} maxResults maximum output items
+ * @returns {{items: Array<{title: string, url: string, snippet: string, published: string}>}}
+ */
+export function normalizeDeepSeekSearchResponse(payload, maxResults = 10) {
+    if (!payload || typeof payload !== 'object') return { items: [] };
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const items = results.map(result => ({
+        title: result?.title,
+        url: result?.url,
+        snippet: result?.summary || result?.snippet || result?.content,
+        published: result?.date,
+    }));
+    return { items: dedupeItems(items, maxResults) };
+}
+
+/**
  * Converts KoboldCpp's local DuckDuckGo response into common records.
  *
  * @param {unknown} payload KoboldCpp response JSON

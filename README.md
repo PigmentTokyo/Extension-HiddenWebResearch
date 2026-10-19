@@ -50,6 +50,7 @@
 | SerpAPI Google Search | 1.13.3+ | 当前用户已保存的共享 SerpAPI Key |
 | Tavily AI Search | 1.13.3+ | 当前用户已保存的共享 Tavily Key |
 | Serper Google Search | 1.13.3+ | 当前用户已保存的共享 Serper Key |
+| DeepSeek Search | 1.13.3+ | DeepSeek API Key（明文保存在扩展设置中，浏览器直连） |
 | KoboldCpp WebSearch | 1.13.3+ | 当前 Text Completion 中配置 KoboldCpp 1.81.1+，并以 `--websearch` 启动 |
 | Extras API | 可选兼容 | 已废弃；需另行配置含 `websearch` 模块的 Extras API，只提供聚合研究包 |
 | Selenium Plugin | 可选兼容 | 需安装并启用 WebSearch Selenium server plugin，只提供聚合研究包 |
@@ -95,6 +96,14 @@ Z.AI 不在支持列表中，也没有凭据入口或可调用路径。Extras/Se
 ### Serper Google Search
 
 扩展复用原版 SillyTavern 的 `SECRET_KEYS.SERPER` 与 Serper 搜索路由。Serper Key 同样是当前用户的共享服务端 secret；每条规划查询只请求一页，只采用具有合法 HTTP(S) URL 的自然结果。服务与额度见 [Serper](https://serper.dev/)。
+
+### DeepSeek Search
+
+扩展在浏览器中直接调用 DeepSeek 官方 [Search API](https://api-docs.deepseek.com/guides/search)（`POST https://api.deepseek.com/v1/tools/search`）。该接口允许跨域，因此不需要额外服务端路由。中文站点（B 站、知乎、萌娘百科、NGA 等）覆盖较好。
+
+- Key 以明文保存在扩展设置（`settings.json`）里，不进入酒馆共享 secret 槽，也不会被排查日志导出；多人或公网酒馆不建议使用。
+- 每条规划查询请求一次，`count` 取“每条查询结果数”，查询词截断到接口上限 128 字。
+- 只采用带合法 HTTP(S) URL 的结果，摘要使用接口返回的 `summary`。
 
 ### KoboldCpp WebSearch
 

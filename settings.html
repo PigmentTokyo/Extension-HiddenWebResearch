@@ -31,6 +31,7 @@
                 <option value="serpapi">SerpAPI Google（适用于所有模型）</option>
                 <option value="tavily">Tavily AI Search（共享 Key）</option>
                 <option value="serper">Serper Google Search（共享 Key）</option>
+                <option value="deepseek">DeepSeek Search（浏览器直连，中文内容强）</option>
                 <option value="koboldcpp">KoboldCpp WebSearch（继承当前连接 URL）</option>
                 <option value="extras">Extras API（已废弃，仅聚合结果）</option>
                 <option value="selenium">Selenium Plugin（需 server plugin，仅聚合结果）</option>
@@ -401,6 +402,30 @@
                     <button id="hwr_test_serper" class="menu_button" type="button">
                         <i class="fa-solid fa-magnifying-glass"></i>
                         <span>测试 Serper（会消耗一次搜索）</span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="hwr_deepseek_settings" class="hwr_backend_box">
+                <h4>DeepSeek Search</h4>
+                <div class="hwr_notice">
+                    由浏览器直接调用 DeepSeek 官方搜索 API（<code>api.deepseek.com/v1/tools/search</code>），不经过酒馆服务端路由。Key 以明文保存在本扩展设置（<code>settings.json</code>）中，能读取这个酒馆用户设置的人都能看到；多人或公网酒馆请勿使用。每条规划查询请求一次，按 DeepSeek 计费，查询词超过 128 字会被截断。
+                </div>
+                <label for="hwr_deepseek_key">DeepSeek API Key</label>
+                <input id="hwr_deepseek_key" class="text_pole" type="password" autocomplete="new-password" spellcheck="false">
+                <div id="hwr_deepseek_status" class="hwr_credential_status" role="status" aria-live="polite"></div>
+                <div class="hwr_button_row">
+                    <button id="hwr_save_deepseek_key" class="menu_button" type="button">
+                        <i class="fa-solid fa-floppy-disk"></i>
+                        <span>保存 DeepSeek Key</span>
+                    </button>
+                    <button id="hwr_clear_deepseek_key" class="menu_button" type="button">
+                        <i class="fa-solid fa-key"></i>
+                        <span>删除 Key</span>
+                    </button>
+                    <button id="hwr_test_deepseek" class="menu_button" type="button">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <span>测试 DeepSeek（会消耗一次搜索）</span>
                     </button>
                 </div>
             </div>

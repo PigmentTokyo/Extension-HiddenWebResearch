@@ -10,6 +10,7 @@ export const STOCK_RESEARCH_BACKENDS = Object.freeze([
     'serpapi',
     'tavily',
     'serper',
+    'deepseek',
     'koboldcpp',
 ]);
 
